@@ -214,12 +214,12 @@ components:
 
   evaluation:
     title: Offline evaluation harness
-    owner: "Pavlos: runner · Yanzhen: accuracy · everyone: data"
+    owner: "Pavlos: runner · Yanzhen: accuracy · Eric: dev split · everyone: data"
     items:
       - todo: Official test set primary; fresh set as a check
       - todo: Baselines and the oracle router
       - todo: 300 messages, 150 grades; split not agreed
-      - todo: "Banking77 development split: no owner"
+      - todo: Banking77 development split
 
   reports:
     title: Reports and artifacts
