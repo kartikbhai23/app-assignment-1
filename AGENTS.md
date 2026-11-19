@@ -31,6 +31,7 @@ Smart AI Gateway (DSAN 6700 final project): a FastAPI gateway that routes bankin
 - `scripts/smoke_compose.py`: smoke test against the public proxy.
 - `scripts/make_banking77_split.py`: downloads Banking77 at a pinned commit and writes `data/banking77_split.csv`; `--check` fails if it differs.
 - `data/banking77_split.csv`: the committed split (`text`, `intent`, `split`, `source_row`). Banking77 is by PolyAI, CC BY 4.0. Never regenerate it with different settings once results depend on it.
+- `scripts/evaluate_jev_order.py`: the Jev route-order experiment. `run` calls the real Jev client on dev-split messages with the two route options in each order (needs `APP_JEV_API_KEY`; saves no message text); `summarize` prints flip rates with bootstrap intervals.
 - `scripts/render_architecture.py`: draws `docs/architecture.svg` from `docs/architecture.yaml`; `--check` fails if they differ.
 - `env/`: `.env.example`, `.env.production.example` and `postgres.env.example` templates. Real `env/.env` and `env/postgres.env` are optional and ignored by git. `compose.defaults.env` holds public throwaway values (store and database password) so Compose and CI start without private files; never use it for a deployment.
 - `compose.yml`: `gateway`, `postgres` (named volume `postgres-data`), `proxy` and `prometheus` services; only `proxy` publishes a port. `compose.chaos.yml`: override that makes the small model corrupt every reply. `compose.outage.yml`: override that makes every call to the small model raise an error.
