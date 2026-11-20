@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, Literal
@@ -190,14 +190,27 @@ class Gateway:
     async def chat(self, message: str) -> ChatResponse:
         try:
             response, jev = await self._chat(message)
-        finally:
+        except BaseException:
             # Interventions also happen on requests that end in a 503.
-            await self.save_interventions()
+            await self._finish(self.save_interventions())
+            raise
         # By now the failure monitor and the metrics have counted this reply,
-        # so a cancel must not stop the save: the saved requests would no
-        # longer match the counts. The save runs as its own task, and a cancel
-        # waits for it (store_timeout bounds the wait) before passing on.
-        save = asyncio.create_task(self._save_request(response, jev))
+        # so a cancel must not stop the saves: the saved requests would no
+        # longer match the counts, and the controller has already handed its
+        # interventions over. Both saves run as one task, in order.
+        await self._finish(self._save_all(response, jev))
+        return response
+
+    async def _save_all(
+        self, response: ChatResponse, jev: Sequence[JevAssessment]
+    ) -> None:
+        await self.save_interventions()
+        await self._save_request(response, jev)
+
+    async def _finish(self, saving: Coroutine[Any, Any, None]) -> None:
+        """Run a save as its own task. A cancel waits for it (store_timeout
+        bounds each store call) before passing on."""
+        save = asyncio.create_task(saving)
         self.pending_saves.add(save)
         save.add_done_callback(self.pending_saves.discard)
         try:
@@ -205,7 +218,6 @@ class Gateway:
         except asyncio.CancelledError:
             await asyncio.wait({save})
             raise
-        return response
 
     async def _save_request(
         self, response: ChatResponse, jev: Sequence[JevAssessment]
