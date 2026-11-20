@@ -11,6 +11,7 @@ Final project for DSAN 6700. This file records who owns what. Owners decide and 
 | Yanzhen Gao | Qwen backends: prompt (classify, read policy card, reply), constrained JSON output, vLLM client with timeouts; per-model accuracy and the always-small / always-large baselines |
 | Sebastian Villalobos | Semantic monitor and controller (reroute, fall back, roll back); Prometheus and Postgres; integration across areas; documentation |
 | Jackson Howes | Linear probe on Qwen3-1.7B activations; Chaos mode screen and probe results view; judge validation if time allows |
+| Eric | Routing analysis: the Banking77 development split; the Jev route-order (position bias) experiment; the routing threshold's quality and cost trade-off against the always-small, always-large and oracle baselines |
 | Everyone | 60 evaluation messages and 30 human reply grades each |
 
 ## Interfaces to agree first
@@ -18,6 +19,8 @@ Final project for DSAN 6700. This file records who owns what. Owners decide and 
 - **Yanzhen + Pavlos:** vLLM URLs for both models and the request/response format. Yanzhen builds against a local stub until the GPU host is ready.
 - **Verness + Sebastian:** the Jev assessment records (one combined routing and intent call per request) that the monitor reads.
 - **Yanzhen + Sebastian:** the backend response record (intent, reply, format check, latency, version ID) that the monitor scores.
+- **Eric + Pavlos + Yanzhen:** the Banking77 development split that the harness, the baselines, the semantic baseline and the probe threshold use. The frozen evaluation set stays separate.
+- **Eric + Verness:** the route-order experiment: how it calls the real Jev client, and what each call records (order shown, answer by route name, errors, tokens), with no message text.
 
 ## Evaluation set (shared)
 
