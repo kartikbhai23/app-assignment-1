@@ -59,6 +59,10 @@ class BackendUnavailable(Exception):
     """No configured backend is available or able to answer."""
 
 
+class DeadlineExceeded(BackendUnavailable):
+    """The request deadline cut short the alternate backend's attempt."""
+
+
 def _jev_error_type(exc: Exception) -> str:
     """A short code for a failed Jev call. Never the exception's message."""
     if isinstance(exc, TimeoutError):
@@ -398,7 +402,7 @@ class Gateway:
         if deadline_exceeded:
             self.metrics.chat_unavailable.inc()
             self.metrics.chat_latency.observe(perf_counter() - start)
-            raise BackendUnavailable("deadline_exceeded")
+            raise DeadlineExceeded
         intent, reply, facts = generated.intent, generated.reply, generated.policy_facts
         uncarded = (
             intent in self.labels.names

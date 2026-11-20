@@ -16,7 +16,7 @@ from app_assignment_1.schemas import (
     JevBreakerStatus,
     RecentRequest,
 )
-from app_assignment_1.service import BackendUnavailable, Gateway
+from app_assignment_1.service import BackendUnavailable, DeadlineExceeded, Gateway
 from app_assignment_1.store import Store, create_store
 
 
@@ -63,7 +63,7 @@ def create_app(
         except BackendUnavailable as exc:
             detail = (
                 "deadline_exceeded"
-                if exc.args == ("deadline_exceeded",)
+                if isinstance(exc, DeadlineExceeded)
                 else "No mock backend is available"
             )
             raise HTTPException(503, detail) from exc
