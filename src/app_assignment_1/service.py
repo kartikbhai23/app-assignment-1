@@ -334,6 +334,32 @@ class Gateway:
             return []
         return records
 
+    async def _generate(
+        self, backend: Backend, message: str, action: str | None
+    ) -> tuple[BackendReply | None, str | None]:
+        """Call one backend. Return its reply, or None if the call failed, and
+        the latest controller action."""
+        usage = self.usage[backend.config.name]
+        usage.attempted_calls += 1
+        try:
+            generated = BackendReply.model_validate(await backend.generate(message))
+        except Exception as exc:
+            usage.failed_calls += 1
+            # A reply that fails BackendReply validation also counts as a call
+            # error. Cancellation still propagates. Do not log input text or
+            # provider exception messages.
+            logger.warning(
+                "Backend %s failed (%s)", backend.config.name, type(exc).__name__
+            )
+            return None, (
+                self.controller.record_error(
+                    backend.config.name, can_disable=self.others_usable(backend)
+                )
+                or action
+            )
+        usage.completed_calls += 1
+        return generated, action
+
     async def _chat(self, message: str) -> tuple[ChatResponse, list[JevAssessment]]:
         # Created before any provider call, so later records can share it.
         request_id = uuid4()
@@ -366,8 +392,10 @@ class Gateway:
         else:
             jev_choice = decision.route
         selected = next(b for b in self.backends if b.config.route == decision.route)
+        order = (selected, *(b for b in self.backends if b is not selected))
         action = None
-        for backend in (selected, *(b for b in self.backends if b is not selected)):
+        generated = None
+        for backend in order:
             if not self.usable(backend):
                 if backend is selected:
                     reasons.append(
@@ -376,26 +404,27 @@ class Gateway:
                         else "selected_backend_unavailable"
                     )
                 continue
-            usage = self.usage[backend.config.name]
-            usage.attempted_calls += 1
-            try:
-                generated = BackendReply.model_validate(await backend.generate(message))
-                usage.completed_calls += 1
+            generated, action = await self._generate(backend, message, action)
+            if generated is not None:
                 break
-            except Exception as exc:
-                usage.failed_calls += 1
-                # A reply that fails BackendReply validation also counts as a call
-                # error. Cancellation still propagates. Do not log input text or
-                # provider exception messages.
-                logger.warning(
-                    "Backend %s failed (%s)", backend.config.name, type(exc).__name__
-                )
-                action = self.controller.record_error(
-                    backend.config.name, can_disable=self.others_usable(backend)
-                )
-                if backend is selected:
-                    reasons.append("selected_backend_error")
-        else:
+            if backend is selected:
+                reasons.append("selected_backend_error")
+        if generated is None:
+            # No usable model answered. A model disabled only for wrong intents
+            # still gives a well-formed reply, which beats a 503: the other
+            # model can start failing after the semantic disable, and the
+            # controller cannot see that coming.
+            for backend in order:
+                if not (
+                    backend.config.available
+                    and self.controller.last_resort(backend.config.name)
+                ):
+                    continue
+                reasons.append("semantic_last_resort")
+                generated, action = await self._generate(backend, message, action)
+                if generated is not None:
+                    break
+        if generated is None:
             self.metrics.chat_unavailable.inc()
             self.metrics.chat_latency.observe(perf_counter() - start)
             raise BackendUnavailable

@@ -20,6 +20,7 @@ from app_assignment_1.schemas import (
 )
 
 Outcome = Literal["ok", "format_failure", "call_error"]
+DisabledFor = Literal["failure", "semantic"]
 
 
 class Controller:
@@ -47,6 +48,9 @@ class Controller:
         self.cooldown = settings.controller_cooldown_seconds
         self.clock = clock
         self.disabled_until: dict[BackendName, float] = {}
+        # Why each disabled model is out. One disabled only for wrong intents
+        # still answers as a last resort (see `last_resort`).
+        self.disabled_for: dict[BackendName, DisabledFor] = {}
         self.warned: set[BackendName] = set()
         self.log: deque[Intervention] = deque(maxlen=50)
         # Every intervention since start; the log above keeps only the latest.
@@ -81,6 +85,7 @@ class Controller:
             return True
         # Re-enabling happens on the next check; log when the cooldown ended.
         del self.disabled_until[name]
+        self.disabled_for.pop(name, None)
         self.windows[name].clear()
         for reset in self.on_reenable:
             reset(name)
@@ -117,16 +122,28 @@ class Controller:
             else "failure"
         )
         reason = f"{kind} rate {rate:.0%} over last {len(window)} calls"
-        return self._disable(name, reason, can_disable, self.warned)
+        return self._disable(name, reason, can_disable, self.warned, "failure")
+
+    def _failing(self, name: BackendName) -> bool:
+        window = self.windows[name]
+        failures = sum(item != "ok" for item in window)
+        return bool(window) and failures / len(window) >= self.threshold
 
     def answering(self, name: BackendName) -> bool:
         """The model has calls in its window and its failure rate is below the
         threshold. An empty window, as after a re-enable, is not evidence."""
-        window = self.windows[name]
-        if not window:
-            return False
-        failures = sum(item != "ok" for item in window)
-        return failures / len(window) < self.threshold
+        return bool(self.windows[name]) and not self._failing(name)
+
+    def last_resort(self, name: BackendName) -> bool:
+        """The model is disabled only because its intents differ from Jev's,
+        and its own failure rate is below the threshold. The gateway still
+        calls it when no other model answers: a reply with a possibly wrong
+        intent is better than a 503."""
+        return (
+            self.is_disabled(name)
+            and self.disabled_for.get(name) == "semantic"
+            and not self._failing(name)
+        )
 
     def record_semantic(
         self, name: BackendName, reason: str | None, can_disable: bool
@@ -138,7 +155,9 @@ class Controller:
             return None
         if name in self.disabled_until:
             return None
-        return self._disable(name, reason, can_disable, self.semantic_warned)
+        return self._disable(
+            name, reason, can_disable, self.semantic_warned, "semantic"
+        )
 
     def _disable(
         self,
@@ -146,6 +165,7 @@ class Controller:
         reason: str,
         can_disable: bool,
         warned: set[BackendName],
+        kind: DisabledFor,
     ) -> str | None:
         if not can_disable:
             # Log once per run above the threshold, not on every failing request.
@@ -155,6 +175,7 @@ class Controller:
             return None
         warned.discard(name)
         self.disabled_until[name] = self.clock() + self.cooldown
+        self.disabled_for[name] = kind
         self._note(name, "disabled", reason)
         return f"disabled {name}: {reason}"
 
@@ -181,6 +202,8 @@ class Controller:
                     call_errors=call_errors,
                     failure_rate=round(failures / len(window), 2) if window else None,
                     disabled_by_controller=disabled,
+                    disabled_for=self.disabled_for.get(name) if disabled else None,
+                    answering=self.answering(name),
                     disabled_for_seconds=(
                         round(self.disabled_until[name] - self.clock(), 1)
                         if disabled

@@ -284,6 +284,7 @@ describe("Semantic monitor", () => {
     const banner = screen.getByRole("status");
     expect(banner).toHaveTextContent("Degraded");
     expect(banner).toHaveTextContent("qwen3-1.7b was disabled by the controller.");
+    expect(banner).toHaveTextContent("If qwen3-4b fails a request, qwen3-1.7b still answers it as a last resort.");
     expect(banner).toHaveTextContent("qwen3-1.7b's intent differs from Jev's on 100% of recent replies (10 of 10), above the 0% baseline.");
     expect(banner).not.toHaveTextContent("takes no action");
     expect(banner).not.toHaveTextContent("keeps it in service");
@@ -317,10 +318,28 @@ describe("Semantic monitor", () => {
   });
 
   it("says the controller waits while the other model has not answered yet", async () => {
-    const monitor = labelSwapHealth.monitor.map((m) => (m.name === "qwen3-4b" ? { ...m, samples: 0, failure_rate: null } : m));
+    const monitor = labelSwapHealth.monitor.map((m) => (m.name === "qwen3-4b" ? { ...m, samples: 0, failure_rate: null, answering: false } : m));
     await openHealth({ ...labelSwapHealth, monitor, semantic_rules: semanticActionHealth.semantic_rules });
 
     expect(screen.getByRole("status")).toHaveTextContent("keeps it in service until qwen3-4b has answered recently without failing.");
+  });
+
+  it("follows the gateway's answering flag, not the rounded failure rate", async () => {
+    // Threshold 0.67 and 2 failures in 3: the rate rounds to 0.67, but the
+    // exact 0.6667 is below the threshold, so the controller acts.
+    const monitor = labelSwapHealth.monitor.map((m) => (m.name === "qwen3-4b" ? { ...m, samples: 3, call_errors: 2, failure_rate: 0.67, answering: true } : m));
+    const controller = { ...labelSwapHealth.controller, failure_threshold: 0.67 };
+    await openHealth({ ...labelSwapHealth, monitor, controller, semantic_rules: semanticActionHealth.semantic_rules });
+
+    const banner = screen.getByRole("status");
+    expect(banner).toHaveTextContent("The controller takes it out of service on its next reply.");
+    expect(banner).not.toHaveTextContent("keeps it in service");
+  });
+
+  it("does not offer a last resort for a model disabled for failures", async () => {
+    await openHealth(degradedHealth);
+
+    expect(screen.getByRole("status")).not.toHaveTextContent("last resort");
   });
 
   it("shows low coverage instead of a healthy rate while Jev is down", async () => {

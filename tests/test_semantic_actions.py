@@ -328,3 +328,111 @@ def test_health_metrics_and_store_show_the_action(tmp_path):
         'gateway_controller_interventions_total{action="disabled",model="qwen3-1.7b"}'
         " 1.0"
     ) in metrics
+
+
+def outage_run(
+    tmp_path, enabled: bool, outage_at: int, requests: int
+) -> tuple[int, int, Gateway]:
+    """The second review's cases: the small model gives well-formed wrong
+    intents from the start, and the large model answers until `outage_at`,
+    then fails every call. 1 request per second, every 4th complex, a Health
+    poll each second. Returns the 503s and the last-resort replies."""
+    clock = Clock()
+    settings = make_settings(
+        tmp_path,
+        swaps=(1, 0),
+        semantic_window=50,
+        semantic_min_samples=10,
+        semantic_alert_margin=0.15,
+        semantic_actions_enabled=enabled,
+        controller_cooldown_seconds=60,
+    )
+    g = gateway(settings, clock)
+    unavailable = last_resort = 0
+    for i in range(requests):
+        clock.now = float(i)
+        if i == outage_at:
+            g.backends[1].config.error_rate = 1
+        g.controller.stats()
+        message = COMPLEX if i % 4 == 3 else STANDARD
+        try:
+            reply = asyncio.run(g.chat(message))
+        except BackendUnavailable:
+            unavailable += 1
+            continue
+        last_resort += "semantic_last_resort" in (reply.trace.fallback_reason or "")
+    return unavailable, last_resort, g
+
+
+@pytest.mark.parametrize(("outage_at", "requests"), [(13, 80), (60, 300)])
+def test_a_later_outage_of_the_other_model_never_gives_503s(
+    tmp_path, outage_at, requests
+):
+    # Before the fix: 59 of 80 and 12 of 300 were 503s with actions on.
+    off, off_last_resort, _ = outage_run(tmp_path, False, outage_at, requests)
+    on, on_last_resort, g = outage_run(tmp_path, True, outage_at, requests)
+    assert (off, on) == (0, 0)
+    assert off_last_resort == 0
+    # The small model was disabled for its intents, then served as a last
+    # resort while the large one failed.
+    assert (SMALL, "disabled") in {(b, a) for b, a, _ in actions(g)}
+    assert on_last_resort > 0
+
+
+def test_an_outage_just_before_the_disable_never_gives_503s(tmp_path):
+    # The large model answers 4 complex messages, then fails 3: 3 failures in
+    # 7 is below the threshold, so it still counts as answering, and the next
+    # standard replies disable the small model.
+    g = gateway(make_settings(tmp_path))
+    send(g, 4, COMPLEX)
+    g.backends[1].config.error_rate = 1
+    assert [r.trace.model for r in send(g, 3, COMPLEX)] == [SMALL] * 3
+    assert g.controller.answering(LARGE)
+    first = send(g, 3)
+    assert first[-1].trace.controller_action == f"disabled {SMALL}: {REASON}"
+    # Before the fix, these three were 503s.
+    later = send(g, 3)
+    assert [r.trace.model for r in later] == [SMALL] * 3
+    assert all(
+        r.trace.fallback_reason == "selected_backend_disabled, semantic_last_resort"
+        for r in later
+    )
+    # The large model failed each time, but it is kept: the small model is out.
+    assert not g.controller.is_disabled(LARGE)
+    assert g.controller.is_disabled(SMALL)
+
+
+def test_only_a_semantic_disable_is_a_last_resort(tmp_path):
+    clock = Clock()
+    c = Controller([SMALL, LARGE], make_settings(tmp_path), clock)
+    assert not c.last_resort(SMALL)  # not disabled
+    c.record_semantic(SMALL, "wrong intents", can_disable=True)
+    assert c.last_resort(SMALL)
+    assert c.stats()[0].disabled_for == "semantic"
+    for _ in range(5):
+        c.record_error(LARGE, can_disable=True)
+    assert c.is_disabled(LARGE)
+    assert not c.last_resort(LARGE)  # disabled for failures
+    assert c.stats()[1].disabled_for == "failure"
+    # Its failing window already rules it out; the reason rules it out too.
+    c.windows[LARGE].clear()
+    assert not c.last_resort(LARGE)
+    # A semantically disabled model that fails its own calls is no help.
+    for _ in range(5):
+        c.record_error(SMALL, can_disable=False)
+    assert not c.last_resort(SMALL)
+    clock.now = 31
+    stats = c.stats()  # re-enables both
+    assert [m.disabled_for for m in stats] == [None, None]
+    assert c.disabled_for == {}
+
+
+def test_health_reports_answering(tmp_path):
+    with TestClient(create_app(make_settings(tmp_path))) as client:
+        before = client.get("/v1/health").json()
+        client.post("/v1/chat", json={"message": COMPLEX})
+        after = client.get("/v1/health").json()
+    answering = {m["name"]: m["answering"] for m in before["monitor"]}
+    assert answering == {SMALL: False, LARGE: False}
+    answering = {m["name"]: m["answering"] for m in after["monitor"]}
+    assert answering == {SMALL: False, LARGE: True}
