@@ -30,6 +30,7 @@ from app_assignment_1.schemas import (
     RoutingDecision,
     Trace,
 )
+from app_assignment_1.semantic import SemanticMonitor, score
 from app_assignment_1.store import MemoryStore, Store
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,9 @@ class Gateway:
         # delays a reply by seconds, not by the pool's 30-second default.
         self.store_timeout = settings.store_timeout_seconds
         self.save_lock = asyncio.Lock()
+        # Request saves still running after their request was cancelled. The
+        # event loop keeps only weak references to tasks, so these keep them.
+        self.pending_saves: set[asyncio.Task[None]] = set()
         intents = load_intents(settings.intents_path)
         self.cards = TypeAdapter(dict[str, PolicyCard]).validate_json(
             settings.policy_cards_path.read_text()
@@ -149,6 +153,9 @@ class Gateway:
             )
         self.controller = Controller(
             (b.config.name for b in self.backends), settings, clock
+        )
+        self.semantic = SemanticMonitor(
+            (b.config.name for b in self.backends), settings
         )
         self.metrics = GatewayMetrics(self)
 
@@ -186,17 +193,33 @@ class Gateway:
         finally:
             # Interventions also happen on requests that end in a 503.
             await self.save_interventions()
+        # By now the failure monitor and the metrics have counted this reply,
+        # so a cancel must not stop the save: the saved requests would no
+        # longer match the counts. The save runs as its own task, and a cancel
+        # waits for it (store_timeout bounds the wait) before passing on.
+        save = asyncio.create_task(self._save_request(response, jev))
+        self.pending_saves.add(save)
+        save.add_done_callback(self.pending_saves.discard)
+        try:
+            await asyncio.shield(save)
+        except asyncio.CancelledError:
+            await asyncio.wait({save})
+            raise
+        return response
+
+    async def _save_request(
+        self, response: ChatResponse, jev: Sequence[JevAssessment]
+    ) -> None:
         try:
             # The Jev assessments are saved with their request or not at all, so
             # every saved assessment has a request to join to. A request that
-            # ends in a 503 or is cancelled saves neither.
+            # ends in a 503 or is cancelled before its reply saves neither.
             await asyncio.wait_for(
                 self.store.save_request(response, jev), self.store_timeout
             )
         except Exception as exc:
             # The customer still gets the reply; it just cannot be looked up later.
             logger.warning("Could not save request (%s)", type(exc).__name__)
-        return response
 
     async def _call_jev(
         self, request_id: UUID, message: str, reasons: list[str]
@@ -396,6 +419,15 @@ class Gateway:
             )
             or action
         )
+        if not format_errors:
+            # Score the model's own label against Jev's intent answer. A failed
+            # format check gives no semantic sample; the controller counted it.
+            sample = score(generated.intent, jev)
+            rerouted = backend is not selected
+            self.semantic.record(backend.config.name, sample, rerouted)
+            self.metrics.semantic_samples.labels(
+                backend.config.name, sample, "rerouted" if rerouted else "own"
+            ).inc()
 
         response = ChatResponse(
             id=request_id,
