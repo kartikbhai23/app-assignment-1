@@ -403,7 +403,7 @@ Both run vLLM `v0.33.0` (image pinned by digest) with `--max-model-len 4096` on 
 
 **Allocate the instance** (once):
 
-1. Create a GPU instance in the same project and private network as the CPU instance. Pick a GPU with at least 20 GB of memory: the two models' bf16 weights are about 12 GB together, and the rest goes to KV cache. The settings in `compose.gpu.yml` are sized for 20 GB. Give it at least 60 GB of disk for the image and the weights.
+1. Create a GPU instance in the same project and private network as the CPU instance. Pick a GPU with at least 20 GB of memory: the two models' bf16 weights are about 12 GB together, and the rest goes to KV cache. The settings in `compose.gpu.yml` are sized for the GRID A100X-20C vGPU, where about 2.16 GiB of the 20 GiB is reserved and not shown by `nvidia-smi`. Give it at least 60 GB of disk for the image and the weights.
 2. Add a security group that keeps SSH and allows TCP 8001–8002 **only from the CPU instance's private IP**.
 3. Install Docker with Compose 2.24+ and the NVIDIA Container Toolkit. Check with `docker run --rm --gpus all ubuntu nvidia-smi`.
 
@@ -419,7 +419,7 @@ docker compose -f compose.gpu.yml --env-file env/gpu.env -p smart-gateway-gpu ps
 nvidia-smi
 ```
 
-The first start downloads both models into the `model-cache` volume, which can take several minutes. `vllm-large` starts only after `vllm-small` is healthy. If `vllm-small` runs out of GPU memory, add `--enforce-eager` to it, or adjust `--gpu-memory-utilization` (0.35 and 0.55), in `compose.gpu.yml` through a pull request.
+The first start downloads both models into the `model-cache` volume, which can take several minutes. `vllm-large` starts only after `vllm-small` is healthy. If `vllm-small` runs out of GPU memory, add `--enforce-eager` to it, or adjust `--gpu-memory-utilization` (0.33 and 0.54; together they must fit in the memory CUDA reports free, not the full 20 GiB), in `compose.gpu.yml` through a pull request.
 
 **Check from the CPU instance**, in a checkout with `uv sync --extra dev --frozen`:
 

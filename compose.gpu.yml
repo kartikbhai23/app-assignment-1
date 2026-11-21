@@ -16,8 +16,15 @@
 # tokenizer, a 2,000-character message about 500 and a 4,000-character reply
 # about 750, so the longest request is about 3,000 tokens.
 #
-# Sized for a 20 GB GPU (also fine on 24 GB). Weights in bf16: 4.06 GB small,
-# 8.04 GB large. 0.35 + 0.55 leaves about 2 GB for the two CUDA contexts.
+# Sized for the Jetstream2 GRID A100X-20C vGPU (20.0 GiB). --gpu-memory-utilization
+# is a share of the full 20.0 GiB, but the vGPU reserves about 2.16 GiB that
+# nvidia-smi does not show, so CUDA sees only 17.84 GiB free before anything
+# starts. vllm-large starts second and needs its whole share free at that
+# point. 0.33 (6.6 GiB) + 0.54 (10.8 GiB) = 17.4 GiB fits in 17.84; the
+# earlier 0.35 + 0.55 (18.0 GiB) did not, and vllm-large failed to start.
+# Measured for vllm-small at 0.35: weights 3.22 GiB, peak activation 0.66,
+# CUDA graphs 0.05, KV cache 3.04; at 0.33 the KV cache is about 2.6 GiB.
+# On a GPU without this reservation there is room to raise both shares.
 # --max-num-seqs 8 (default 256) keeps activation and CUDA-graph memory small,
 # which leaves more for the KV cache; a demo never runs 8 requests at once
 # per model. vLLM refuses to start unless one 4,096-token request fits in the
@@ -54,7 +61,7 @@ services:
       - --served-model-name=qwen3-1.7b
       - --max-model-len=4096
       - --max-num-seqs=8
-      - --gpu-memory-utilization=0.35
+      - --gpu-memory-utilization=0.33
     ports:
       - "${VLLM_BIND_IP:?set VLLM_BIND_IP in env/gpu.env to the GPU host private IP}:8001:8000"
 
@@ -68,7 +75,7 @@ services:
       - --served-model-name=qwen3-4b
       - --max-model-len=4096
       - --max-num-seqs=8
-      - --gpu-memory-utilization=0.55
+      - --gpu-memory-utilization=0.54
     ports:
       - "${VLLM_BIND_IP:?set VLLM_BIND_IP in env/gpu.env to the GPU host private IP}:8002:8000"
     depends_on:
