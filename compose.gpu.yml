@@ -1,0 +1,80 @@
+# GPU host only: the two Qwen models served by vLLM. This is its own Compose
+# project on the Jetstream2 GPU instance, not an override of compose.yml.
+#
+#   docker compose -f compose.gpu.yml --env-file env/gpu.env -p smart-gateway-gpu up -d --wait
+#
+# Each server binds only to the GPU host's private IP (VLLM_BIND_IP in
+# env/gpu.env), so only the CPU instance on the private network can reach it.
+# Compose refuses to start without VLLM_BIND_IP instead of binding to 0.0.0.0.
+# The security group must also allow 8001-8002 from the CPU instance only.
+#
+# Pinned: vLLM v0.33.0 and each model's Hugging Face commit. Change a pin in a
+# pull request, not on the host. --served-model-name matches `name` in
+# config/backends.json.
+#
+# --max-model-len 4096: the system prompt is 1,644 tokens with the pinned
+# tokenizer, a 2,000-character message about 500 and a 4,000-character reply
+# about 750, so the longest request is about 3,000 tokens.
+#
+# Sized for a 20 GB GPU (also fine on 24 GB). Weights in bf16: 4.06 GB small,
+# 8.04 GB large. 0.35 + 0.55 leaves about 2 GB for the two CUDA contexts.
+# --max-num-seqs 8 (default 256) keeps activation and CUDA-graph memory small,
+# which leaves more for the KV cache; a demo never runs 8 requests at once
+# per model. vLLM refuses to start unless one 4,096-token request fits in the
+# KV cache (0.44 GiB small, 0.56 GiB large). If vllm-small still does not
+# start, add --enforce-eager to it (less memory, somewhat slower).
+
+x-vllm: &vllm
+  image: vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
+  volumes:
+    - model-cache:/root/.cache/huggingface
+  ipc: host
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+  healthcheck:
+    test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+    interval: 15s
+    timeout: 5s
+    retries: 5
+    # The first start downloads the weights into model-cache.
+    start_period: 900s
+  restart: unless-stopped
+
+services:
+  vllm-small:
+    <<: *vllm
+    command:
+      - --model=Qwen/Qwen3-1.7B
+      - --revision=70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+      - --served-model-name=qwen3-1.7b
+      - --max-model-len=4096
+      - --max-num-seqs=8
+      - --gpu-memory-utilization=0.35
+    ports:
+      - "${VLLM_BIND_IP:?set VLLM_BIND_IP in env/gpu.env to the GPU host private IP}:8001:8000"
+
+  # Starts after vllm-small is healthy, so its memory check sees the small
+  # model's share already taken.
+  vllm-large:
+    <<: *vllm
+    command:
+      - --model=Qwen/Qwen3-4B
+      - --revision=1cfa9a7208912126459214e8b04321603b3df60c
+      - --served-model-name=qwen3-4b
+      - --max-model-len=4096
+      - --max-num-seqs=8
+      - --gpu-memory-utilization=0.55
+    ports:
+      - "${VLLM_BIND_IP:?set VLLM_BIND_IP in env/gpu.env to the GPU host private IP}:8002:8000"
+    depends_on:
+      vllm-small:
+        condition: service_healthy
+
+volumes:
+  # The model volume: Qwen weights and tokenizers at the pinned revisions.
+  model-cache:
