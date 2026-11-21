@@ -208,8 +208,11 @@ class Gateway:
         await self._save_request(response, jev)
 
     async def _finish(self, saving: Coroutine[Any, Any, None]) -> None:
-        """Run a save as its own task. A cancel waits for it (store_timeout
-        bounds each store call) before passing on."""
+        """Run a save as its own task. A cancel waits for it, then passes on.
+
+        store_timeout bounds each store call, not the whole wait: a save can
+        first queue on save_lock behind other intervention saves, so during a
+        store outage the k-th queued request waits about k * store_timeout."""
         save = asyncio.create_task(saving)
         self.pending_saves.add(save)
         save.add_done_callback(self.pending_saves.discard)
