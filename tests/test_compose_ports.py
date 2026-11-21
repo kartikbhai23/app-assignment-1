@@ -41,3 +41,10 @@ def test_vllm_names_match_backend_config():
         if arg.startswith("--served-model-name=")
     }
     assert served == names
+
+
+def test_model_cache_is_a_required_host_directory():
+    for name, svc in _services("compose.gpu.yml").items():
+        mounts = [v for v in svc["volumes"] if v.endswith(":/root/.cache/huggingface")]
+        assert len(mounts) == 1, name
+        assert mounts[0].startswith("${MODEL_CACHE_DIR:?"), (name, mounts[0])

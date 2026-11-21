@@ -8,6 +8,11 @@
 # Compose refuses to start without VLLM_BIND_IP instead of binding to 0.0.0.0.
 # The security group must also allow 8001-8002 from the CPU instance only.
 #
+# The Hugging Face cache (weights and tokenizers, about 12 GB) lives in a host
+# directory, MODEL_CACHE_DIR in env/gpu.env, also required. On Jetstream2 use
+# an attached volume such as /media/volume/gpu-models: the vLLM image alone
+# takes about 37 GB, so the instance's 58 GB root disk cannot hold the models.
+#
 # Pinned: vLLM v0.33.0 and each model's Hugging Face commit. Change a pin in a
 # pull request, not on the host. --served-model-name matches `name` in
 # config/backends.json.
@@ -34,7 +39,7 @@
 x-vllm: &vllm
   image: vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
   volumes:
-    - model-cache:/root/.cache/huggingface
+    - "${MODEL_CACHE_DIR:?set MODEL_CACHE_DIR in env/gpu.env to the model directory}:/root/.cache/huggingface"
   ipc: host
   deploy:
     resources:
@@ -48,7 +53,7 @@ x-vllm: &vllm
     interval: 15s
     timeout: 5s
     retries: 5
-    # The first start downloads the weights into model-cache.
+    # The first start downloads the weights into MODEL_CACHE_DIR.
     start_period: 900s
   restart: unless-stopped
 
@@ -82,6 +87,3 @@ services:
       vllm-small:
         condition: service_healthy
 
-volumes:
-  # The model volume: Qwen weights and tokenizers at the pinned revisions.
-  model-cache:
