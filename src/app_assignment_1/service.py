@@ -219,6 +219,14 @@ class Gateway:
             await asyncio.wait({save})
             raise
 
+    async def finish_saves(self) -> None:
+        """At shutdown, before the store closes: wait for saves still running,
+        such as those of requests the server cancelled, then save anything
+        noticed since the last request (a /metrics scrape can see a re-enable)."""
+        while self.pending_saves:
+            await asyncio.wait(set(self.pending_saves))
+        await self.save_interventions()
+
     async def _save_request(
         self, response: ChatResponse, jev: Sequence[JevAssessment]
     ) -> None:

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from app_assignment_1.jev import TypeSafeJevRouter, create_jev_http_client
 from app_assignment_1.labels import load_labels
 from app_assignment_1.records import JevAssessment, check_call
 from app_assignment_1.router import MockJevRouter
+from app_assignment_1.schemas import Intervention
 from app_assignment_1.service import BackendUnavailable, Gateway
 from app_assignment_1.store import MemoryStore
 
@@ -347,6 +349,55 @@ def test_a_request_cancelled_while_saving_interventions_is_still_saved(
     assert [i.action for i in store.interventions] == ["disabled"]
     assert gw.controller.unsaved == []
     assert len(store.requests) == chat_count(gw)
+    assert gw.pending_saves == set()
+
+
+class ClosingStore(MemoryStore):
+    """Holds each intervention save open for 0.2 s, and fails every call after
+    close(), as PostgresStore does once its pool is closed."""
+
+    closed = False
+
+    async def save_interventions(self, items: Any) -> None:
+        await asyncio.sleep(0.2)
+        if self.closed:
+            raise ConnectionError("store is closed")
+        await super().save_interventions(items)
+
+    async def save_request(self, response: Any, jev: Any = ()) -> None:
+        if self.closed:
+            raise ConnectionError("store is closed")
+        await super().save_request(response, jev)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def test_shutdown_waits_for_a_cancelled_request_to_save(settings: Settings) -> None:
+    # uvicorn with --timeout-graceful-shutdown cancels running requests, then
+    # runs the lifespan shutdown without waiting for them.
+    store = ClosingStore(settings.request_store_limit)
+    app = create_app(settings, store=store)
+    held = Intervention(
+        at=datetime.now(UTC), backend="qwen3-1.7b", action="disabled", reason="test"
+    )
+
+    async def run() -> Gateway:
+        async with app.router.lifespan_context(app):
+            gw: Gateway = app.state.gateway
+            gw.controller.unsaved.append(held)
+            task = asyncio.create_task(gw.chat(MESSAGE))
+            await asyncio.sleep(0.05)  # reply counted, held in the intervention save
+            task.cancel()
+        assert store.closed
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return gw
+
+    gw = asyncio.run(run())
+    assert list(store.interventions) == [held]
+    assert gw.controller.unsaved == []
+    assert len(store.requests) == chat_count(gw) == 1
     assert gw.pending_saves == set()
 
 
