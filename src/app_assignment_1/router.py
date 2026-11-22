@@ -12,7 +12,12 @@ from pydantic import Field, model_validator
 
 from app_assignment_1.intents import load_intents, match_intent, words
 from app_assignment_1.labels import UNKNOWN
-from app_assignment_1.records import ROUTE_OPTIONS, check_probabilities
+from app_assignment_1.records import (
+    ROUTE_OPTIONS,
+    ROUTE_ORDER,
+    check_probabilities,
+    check_route_order,
+)
 from app_assignment_1.schemas import RoutingDecision, StrictModel
 
 
@@ -58,12 +63,16 @@ class JevResult(StrictModel):
     provider_request_id: str | None = None  # x-typesafe-request-id, if present
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
+    # The order Jev was shown the route options in, for the position-bias
+    # analysis (#86). None when the router does not know it.
+    route_order: list[str] | None = None
 
     @model_validator(mode="after")
     def check_route_options(self) -> "JevResult":
         probabilities = self.route.probabilities
         if probabilities is not None and set(probabilities) != ROUTE_OPTIONS:
             raise ValueError("The route answer chooses standard or complex")
+        check_route_order(self.route_order)
         return self
 
 
@@ -123,6 +132,7 @@ class MockJevRouter:
             jev_model="mock-jev",
             input_tokens=0,
             output_tokens=0,
+            route_order=list(ROUTE_ORDER),
         )
 
     def _spread(self, choice: str, confidence: float) -> dict[str, float]:

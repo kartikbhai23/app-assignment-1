@@ -108,6 +108,7 @@ def create_app(
                 failure_limit=breaker.failure_limit,
                 cooldown_seconds=breaker.cooldown,
             ),
+            settings_version=gateway.settings_version,
             semantic=gateway.semantic.stats(),
             semantic_rules=gateway.semantic.rules,
         )

@@ -55,6 +55,9 @@ class Trace(StrictModel):
     fallback_reason: str | None = None
     controller_action: str | None = None
     mocked: Literal[True] = True
+    # Groups requests by the settings and config files that answered them.
+    # None on requests saved before it existed.
+    settings_version: str | None = None
 
 
 class ChatResponse(StrictModel):
@@ -213,5 +216,7 @@ class HealthResponse(StrictModel):
     interventions: list[Intervention]
     controller: ControllerRules
     jev_breaker: JevBreakerStatus
+    # The same ID as on each reply's trace, for the settings now in use.
+    settings_version: str | None = None
     semantic: list[SemanticStatus]
     semantic_rules: SemanticRules

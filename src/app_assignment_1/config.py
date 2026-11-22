@@ -1,8 +1,11 @@
 """Cached Pydantic Settings. Environment variables override optional env files."""
 
+import hashlib
+import json
+from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 from psycopg.conninfo import conninfo_to_dict
 from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
@@ -28,6 +31,9 @@ class Settings(BaseSettings):
     policy_cards_path: Path = Path("config/policy_cards.json")
     backends_path: Path = Path("config/backends.json")
     request_store_limit: int = Field(default=1000, ge=1, le=100000)
+    # Postgres keeps every request by default, for analysis. Set a number to
+    # keep only the newest ones. The memory store uses request_store_limit.
+    postgres_request_limit: int | None = Field(default=None, ge=1)
     jev_timeout_seconds: float = Field(default=2, gt=0, le=30)
     rule_router_complex_min_words: int = Field(default=20, ge=1, le=2000)
     monitor_window: int = Field(default=20, ge=1, le=1000)
@@ -123,6 +129,30 @@ class Settings(BaseSettings):
         if self.provider_mode == "real" and self.jev_base_url.scheme != "https":
             raise ValueError("provider_mode 'real' needs an https APP_JEV_BASE_URL")
         return self
+
+
+def settings_version(settings: "Settings", files: Iterable[Path]) -> str:
+    """A short ID for the settings and config files that answer requests.
+
+    Two requests with the same ID ran under the same thresholds, switches and
+    config files, so statistics can be grouped by it. Secrets never go in:
+    SecretStr fields are left out, not hashed.
+    """
+    secret = {
+        name
+        for name, field in type(settings).model_fields.items()
+        if field.annotation is SecretStr or SecretStr in get_args(field.annotation)
+    }
+    values = {
+        name: value
+        for name, value in settings.model_dump(mode="json").items()
+        if name not in secret
+    }
+    digest = hashlib.sha256(json.dumps(values, sort_keys=True).encode())
+    for path in files:
+        digest.update(path.name.encode())
+        digest.update(path.read_bytes())
+    return f"settings-{digest.hexdigest()[:12]}"
 
 
 @lru_cache

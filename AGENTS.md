@@ -31,6 +31,7 @@ Smart AI Gateway (DSAN 6700 final project): a FastAPI gateway that routes bankin
 - `tests/`: pytest suite. Frontend tests are in `frontend/src/App.test.jsx`.
 - `scripts/smoke_compose.py`: smoke test against the public proxy.
 - `scripts/probe_false_pass.py`: simulates how often the probe gate passes with no signal (see `docs/PROBE.md`).
+- `scripts/export_analysis.py`: exports requests and Jev assessments from Postgres as JSON Lines for analysis, without reply text.
 - `scripts/jev_live_check.py`: the B6 live Jev check, run by hand with a TypeSafe key. `sample` draws messages from the Banking77 training split, `run` calls Jev once per message, and `summarize` prints the measurements. Its logs keep no message text.
 - `scripts/render_architecture.py`: draws `docs/architecture.svg` from `docs/architecture.yaml`; `--check` fails if they differ.
 - `env/`: `.env.example`, `.env.production.example` and `postgres.env.example` templates. Real `env/.env` and `env/postgres.env` are optional and ignored by git. `compose.defaults.env` holds public throwaway values (store and database password) so Compose and CI start without private files; never use it for a deployment.

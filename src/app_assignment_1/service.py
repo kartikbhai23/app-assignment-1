@@ -14,7 +14,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from app_assignment_1.backends import Backend, MockBackend
 from app_assignment_1.breaker import CircuitBreaker
-from app_assignment_1.config import Settings
+from app_assignment_1.config import Settings, settings_version
 from app_assignment_1.intents import load_intents
 from app_assignment_1.labels import UNKNOWN, load_labels
 from app_assignment_1.metrics import GatewayMetrics
@@ -77,11 +77,18 @@ def _jev_error_type(exc: Exception) -> str:
 
 
 def _assessment(
-    call: dict[str, Any], question: Literal["route", "intent"], answer: JevAnswer
+    call: dict[str, Any],
+    question: Literal["route", "intent"],
+    answer: JevAnswer,
+    option_order: list[str] | None = None,
 ) -> JevAssessment:
     if answer.error_type is not None:
         return JevAssessment(
-            **call, question=question, status="error", error_type=answer.error_type
+            **call,
+            question=question,
+            status="error",
+            error_type=answer.error_type,
+            option_order=option_order,
         )
     return JevAssessment(
         **call,
@@ -90,6 +97,7 @@ def _assessment(
         choice=answer.choice,
         confidence=answer.confidence,
         probabilities=answer.probabilities,
+        option_order=option_order,
     )
 
 
@@ -162,6 +170,15 @@ class Gateway:
         )
         self.semantic = SemanticMonitor(
             (b.config.name for b in self.backends), settings
+        )
+        self.settings_version = settings_version(
+            settings,
+            (
+                settings.intents_path,
+                settings.labels_path,
+                settings.policy_cards_path,
+                settings.backends_path,
+            ),
         )
         self.metrics = GatewayMetrics(self)
 
@@ -341,7 +358,9 @@ class Gateway:
                     "output_tokens": result.output_tokens,
                 }
                 records = [
-                    _assessment(call, "route", result.route),
+                    _assessment(
+                        call, "route", result.route, option_order=result.route_order
+                    ),
                     _assessment(call, "intent", result.intent),
                 ]
             check_call(records)
@@ -517,6 +536,7 @@ class Gateway:
                 format_errors=format_errors,
                 fallback_reason=", ".join(reasons) or None,
                 controller_action=action,
+                settings_version=self.settings_version,
             ),
         )
         trace = response.trace
