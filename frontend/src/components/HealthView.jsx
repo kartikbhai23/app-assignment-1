@@ -115,7 +115,7 @@ function bannerFor(health, models) {
     if (!m.disabled_by_controller) return `${m.name} is marked unavailable in the config. Its requests are going to ${up.name}.`;
     const moved = `${m.name} was disabled by the controller. ${m.route[0].toUpperCase() + m.route.slice(1)} requests are going to ${up.name} until the cooldown ends.`;
     // Disabled only for its intents: it still answers when the other model fails.
-    return m.disabled_for === "semantic" ? `${moved} If ${up.name} fails a request, ${m.name} still answers it as a last resort.` : moved;
+    return m.disabled_for === "semantic" ? `${moved} If ${up.name} fails a request, the gateway still sends it to ${m.name} as a last resort.` : moved;
   });
   if (semantic) parts.push(semantic);
   if (jev) parts.push(jev);

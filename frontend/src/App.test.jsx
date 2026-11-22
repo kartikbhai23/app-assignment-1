@@ -284,7 +284,7 @@ describe("Semantic monitor", () => {
     const banner = screen.getByRole("status");
     expect(banner).toHaveTextContent("Degraded");
     expect(banner).toHaveTextContent("qwen3-1.7b was disabled by the controller.");
-    expect(banner).toHaveTextContent("If qwen3-4b fails a request, qwen3-1.7b still answers it as a last resort.");
+    expect(banner).toHaveTextContent("If qwen3-4b fails a request, the gateway still sends it to qwen3-1.7b as a last resort.");
     expect(banner).toHaveTextContent("qwen3-1.7b's intent differs from Jev's on 100% of recent replies (10 of 10), above the 0% baseline.");
     expect(banner).not.toHaveTextContent("takes no action");
     expect(banner).not.toHaveTextContent("keeps it in service");
