@@ -191,6 +191,9 @@ class SemanticStatus(StrictModel):
     rerouted_agreements: int = Field(ge=0)
     rerouted_disagreements: int = Field(ge=0)
     rerouted_no_signal: int = Field(ge=0)
+    # Replies since the gateway started that were not scored, because one of
+    # Jev and the model is a mock and the other is real.
+    not_compared: int = Field(default=0, ge=0)
 
 
 class SemanticRules(StrictModel):

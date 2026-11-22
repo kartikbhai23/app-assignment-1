@@ -153,6 +153,16 @@ function SemanticCard({ semantic, rules }) {
         A model needs {rules.min_samples} scored replies first, and at least {percent(rules.min_coverage)} of its replies need a Jev answer, so a Jev outage
         does not look like a healthy model. In mock mode, Jev and both models use the same keyword matcher, so a healthy model always agrees.
       </p>
+      {semantic.some((m) => m.not_compared) ? (
+        <p className="muted small">
+          Not compared since the gateway started:{" "}
+          {semantic
+            .filter((m) => m.not_compared)
+            .map((m) => `${m.not_compared} from ${m.name}`)
+            .join(", ")}
+          . One of Jev and the model is a mock and the other is real, so their intents differ by design and would say nothing about the model.
+        </p>
+      ) : null}
     </section>
   );
 }

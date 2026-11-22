@@ -67,6 +67,15 @@ class GatewayMetrics:
             for sample in SAMPLES:
                 for traffic in ("own", "rerouted"):
                     self.semantic_samples.labels(backend.config.name, sample, traffic)
+        self.semantic_not_compared = Counter(
+            "gateway_semantic_not_compared",
+            "Replies that passed the format check but were not scored against "
+            "Jev, because one of Jev and the model is a mock and the other real.",
+            ["model"],
+            registry=self.registry,
+        )
+        for backend in gateway.backends:
+            self.semantic_not_compared.labels(backend.config.name)
         self.registry.register(_GatewayStateCollector(gateway))
 
     def render(self) -> bytes:
