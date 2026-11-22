@@ -24,6 +24,7 @@ from app_assignment_1.schemas import (
 )
 from app_assignment_1.service import (
     BackendUnavailable,
+    DeadlineExceeded,
     Gateway,
     LastUsableBackend,
     NotAMock,
@@ -51,9 +52,7 @@ def create_app(
         try:
             yield
         finally:
-            # Save anything noticed since the last request, such as a re-enable
-            # seen by a /metrics scrape.
-            await gateway.save_interventions()
+            await gateway.finish_saves()
             await opened.close()
 
     app = FastAPI(
@@ -73,7 +72,12 @@ def create_app(
         try:
             return await gateway.chat(payload.message)
         except BackendUnavailable as exc:
-            raise HTTPException(503, "No mock backend is available") from exc
+            detail = (
+                "deadline_exceeded"
+                if isinstance(exc, DeadlineExceeded)
+                else "No mock backend is available"
+            )
+            raise HTTPException(503, detail) from exc
 
     @app.get("/v1/requests/{request_id}", response_model=ChatResponse)
     async def get_request(request_id: UUID, request: Request) -> ChatResponse:

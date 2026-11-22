@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, Literal
@@ -60,6 +60,10 @@ def check_reply(reply: str) -> list[str]:
 
 class BackendUnavailable(Exception):
     """No configured backend is available or able to answer."""
+
+
+class DeadlineExceeded(BackendUnavailable):
+    """The request deadline cut short the alternate backend's attempt."""
 
 
 class LastUsableBackend(Exception):
@@ -123,6 +127,8 @@ class Gateway:
             settings.jev_breaker_failures, settings.jev_breaker_cooldown_seconds, clock
         )
         self.rule_router = RuleRouter(settings.rule_router_complex_min_words)
+        self.request_deadline = settings.request_deadline_seconds
+        self.alternate_reserve = settings.alternate_reserve_seconds
         self.jev_timeout = settings.jev_timeout_seconds
         self.store = store or MemoryStore(settings.request_store_limit)
         # Each store write waits at most this long, so a database outage
@@ -232,14 +238,30 @@ class Gateway:
     async def chat(self, message: str) -> ChatResponse:
         try:
             response, jev = await self._chat(message)
-        finally:
+        except BaseException:
             # Interventions also happen on requests that end in a 503.
-            await self.save_interventions()
+            await self._finish(self.save_interventions())
+            raise
         # By now the failure monitor and the metrics have counted this reply,
-        # so a cancel must not stop the save: the saved requests would no
-        # longer match the counts. The save runs as its own task, and a cancel
-        # waits for it (store_timeout bounds the wait) before passing on.
-        save = asyncio.create_task(self._save_request(response, jev))
+        # so a cancel must not stop the saves: the saved requests would no
+        # longer match the counts, and the controller has already handed its
+        # interventions over. Both saves run as one task, in order.
+        await self._finish(self._save_all(response, jev))
+        return response
+
+    async def _save_all(
+        self, response: ChatResponse, jev: Sequence[JevAssessment]
+    ) -> None:
+        await self.save_interventions()
+        await self._save_request(response, jev)
+
+    async def _finish(self, saving: Coroutine[Any, Any, None]) -> None:
+        """Run a save as its own task. A cancel waits for it, then passes on.
+
+        store_timeout bounds each store call, not the whole wait: a save can
+        first queue on save_lock behind other intervention saves, so during a
+        store outage the k-th queued request waits about k * store_timeout."""
+        save = asyncio.create_task(saving)
         self.pending_saves.add(save)
         save.add_done_callback(self.pending_saves.discard)
         try:
@@ -247,7 +269,14 @@ class Gateway:
         except asyncio.CancelledError:
             await asyncio.wait({save})
             raise
-        return response
+
+    async def finish_saves(self) -> None:
+        """At shutdown, before the store closes: wait for saves still running,
+        such as those of requests the server cancelled, then save anything
+        noticed since the last request (a /metrics scrape can see a re-enable)."""
+        while self.pending_saves:
+            await asyncio.wait(set(self.pending_saves))
+        await self.save_interventions()
 
     async def _save_request(
         self, response: ChatResponse, jev: Sequence[JevAssessment]
@@ -397,7 +426,10 @@ class Gateway:
             jev_choice = decision.route
         selected = next(b for b in self.backends if b.config.route == decision.route)
         action = None
-        for backend in (selected, *(b for b in self.backends if b is not selected)):
+        attempted = 0
+        deadline_exceeded = False
+        order = (selected, *(b for b in self.backends if b is not selected))
+        for position, backend in enumerate(order):
             if not self.usable(backend):
                 if backend is selected:
                     reasons.append(
@@ -406,13 +438,39 @@ class Gateway:
                         else "selected_backend_unavailable"
                     )
                 continue
+            remaining = self.request_deadline - (perf_counter() - start)
+            if remaining <= 0:
+                deadline_exceeded = True
+                break
+            # Hold back the reserve only when another model can still answer.
+            # Otherwise this is the last chance, so it gets all the time left.
+            fallback_left = any(self.usable(b) for b in order[position + 1 :])
+            budget = (
+                remaining - self.alternate_reserve
+                if attempted == 0 and fallback_left
+                else remaining
+            )
+            if budget <= 0:
+                deadline_exceeded = True
+                break
             usage = self.usage[backend.config.name]
             usage.attempted_calls += 1
+            attempted += 1
+            timer = asyncio.timeout(budget)
             try:
-                generated = BackendReply.model_validate(await backend.generate(message))
+                async with timer:
+                    generated = BackendReply.model_validate(
+                        await backend.generate(message)
+                    )
                 usage.completed_calls += 1
                 break
             except Exception as exc:
+                if timer.expired() and attempted > 1:
+                    # The alternate had a shortened opportunity. Do not score
+                    # this as a model failure or a successful monitor sample.
+                    usage.deadline_exceeded_calls += 1
+                    deadline_exceeded = True
+                    break
                 usage.failed_calls += 1
                 # A reply that fails BackendReply validation also counts as a call
                 # error. Cancellation still propagates. Do not log input text or
@@ -429,6 +487,10 @@ class Gateway:
             self.metrics.chat_unavailable.inc()
             self.metrics.chat_latency.observe(perf_counter() - start)
             raise BackendUnavailable
+        if deadline_exceeded:
+            self.metrics.chat_unavailable.inc()
+            self.metrics.chat_latency.observe(perf_counter() - start)
+            raise DeadlineExceeded
         intent, reply, facts = generated.intent, generated.reply, generated.policy_facts
         uncarded = (
             intent in self.labels.names
