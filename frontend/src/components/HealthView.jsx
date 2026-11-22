@@ -157,7 +157,17 @@ function SemanticCard({ semantic, rules }) {
   );
 }
 
-function JevCard({ breaker }) {
+function usageText(usage) {
+  if (!usage.answered_calls) return "none yet";
+  return `${usage.input_tokens.toLocaleString()} in, ${usage.output_tokens.toLocaleString()} out (${usage.answered_calls} calls)`;
+}
+
+function costText(usage) {
+  if (usage.estimated_cost_usd === null) return "price not set";
+  return "$" + usage.estimated_cost_usd.toFixed(4);
+}
+
+function JevCard({ breaker, usage }) {
   const pill = BREAKER_PILLS[breaker.state];
   return (
     <section className="card model-card" aria-label="Jev router">
@@ -185,7 +195,20 @@ function JevCard({ breaker }) {
           <div className="muted">Cool-off</div>
           <strong>{breaker.cooldown_seconds} s</strong>
         </div>
+        {usage && (
+          <>
+            <div className="stat">
+              <div className="muted">Tokens since start</div>
+              <strong>{usageText(usage)}</strong>
+            </div>
+            <div className="stat">
+              <div className="muted">Estimated cost</div>
+              <strong>{costText(usage)}</strong>
+            </div>
+          </>
+        )}
       </div>
+      {usage?.mocked && <p className="muted small">Mock Jev reports no tokens, so these stay at 0 until real Jev is on.</p>}
     </section>
   );
 }
@@ -284,7 +307,7 @@ function HealthBody({ health }) {
         {models.map((model) => (
           <ModelCard key={model.name} model={model} threshold={rules.failure_threshold} />
         ))}
-        {health.jev_breaker && <JevCard breaker={health.jev_breaker} />}
+        {health.jev_breaker && <JevCard breaker={health.jev_breaker} usage={health.jev_usage} />}
       </div>
 
       {health.semantic && health.semantic_rules && <SemanticCard semantic={health.semantic} rules={health.semantic_rules} />}

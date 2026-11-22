@@ -162,6 +162,7 @@ describe("Health", () => {
 
     const jev = await screen.findByRole("region", { name: "Jev router" });
     expect(within(jev).getByText("Calling Jev")).toBeInTheDocument();
+    expect(within(jev).getByText("price not set")).toBeInTheDocument();
     expect(within(jev).getByText("0 of 5")).toBeInTheDocument();
     expect(within(jev).getByText("30 s")).toBeInTheDocument();
   });
@@ -268,6 +269,16 @@ describe("Semantic monitor", () => {
     expect(screen.getByText(/Flagged above 15%: the 0% baseline plus a 15% margin/)).toBeInTheDocument();
     // The models still serve, so the gateway's own status is unchanged.
     expect(screen.getByText("Gateway healthy")).toBeInTheDocument();
+  });
+
+  it("shows Jev tokens and the estimated cost", async () => {
+    const jev_usage = { mocked: false, answered_calls: 3, input_tokens: 6000, output_tokens: 21, estimated_cost_usd: 0.000252 };
+    await openHealth({ ...healthyHealth, jev_usage });
+
+    const jev = screen.getByRole("region", { name: "Jev router" });
+    expect(within(jev).getByText("6,000 in, 21 out (3 calls)")).toBeInTheDocument();
+    expect(within(jev).getByText("$0.0003")).toBeInTheDocument();
+    expect(within(jev).queryByText(/Mock Jev reports no tokens/)).not.toBeInTheDocument();
   });
 
   it("shows low coverage instead of a healthy rate while Jev is down", async () => {

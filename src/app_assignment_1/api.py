@@ -107,6 +107,7 @@ def create_app(
             ),
             semantic=gateway.semantic.stats(),
             semantic_rules=gateway.semantic.rules,
+            jev_usage=gateway.jev_usage(),
         )
 
     # Internal only: Caddy does not proxy /metrics, and it stays out of /v1 and

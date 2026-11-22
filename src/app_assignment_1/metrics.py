@@ -127,6 +127,35 @@ class _GatewayStateCollector(Collector):
                 interventions.add_metric([action, name], counts[(action, name)])
         yield interventions
 
+        # One label value per process: mocked Jev reports 0 tokens, and the
+        # label keeps mock runs apart when series are compared later.
+        jev = gateway.jev_usage()
+        mocked = "true" if jev.mocked else "false"
+        answered = CounterMetricFamily(
+            "gateway_jev_answered_calls",
+            "Jev calls that returned an answer; each call counts once.",
+            labels=["mocked"],
+        )
+        answered.add_metric([mocked], jev.answered_calls)
+        tokens = CounterMetricFamily(
+            "gateway_jev_tokens",
+            "Tokens of answered Jev calls, by direction.",
+            labels=["direction", "mocked"],
+        )
+        tokens.add_metric(["input", mocked], jev.input_tokens)
+        tokens.add_metric(["output", mocked], jev.output_tokens)
+        yield from (answered, tokens)
+        # Absent while APP_JEV_INPUT_PRICE_PER_MILLION_USD is unset, so an
+        # unknown price never reads as $0.
+        if jev.estimated_cost_usd is not None:
+            cost = CounterMetricFamily(
+                "gateway_jev_estimated_cost_usd",
+                "Estimated Jev cost: input tokens times the configured price.",
+                labels=["mocked"],
+            )
+            cost.add_metric([mocked], jev.estimated_cost_usd)
+            yield cost
+
         # Only models with data get a value: an empty window is not 0%.
         disagreement = GaugeMetricFamily(
             "gateway_semantic_disagreement_rate",
