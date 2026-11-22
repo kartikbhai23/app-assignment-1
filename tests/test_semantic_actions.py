@@ -509,3 +509,29 @@ def test_a_cooldown_that_ends_during_another_call_is_used(tmp_path):
     # Re-enabled, not a last resort.
     assert reply.trace.fallback_reason == "selected_backend_disabled"
     assert not g.controller.is_disabled(SMALL)
+
+
+def test_the_reserve_is_kept_for_a_last_resort(tmp_path):
+    # The small model is disabled for its intents. A complex message goes to
+    # the large model first, which hangs. Because the small model can still
+    # answer as a last resort, the large model gets the deadline minus the
+    # reserve, and the small model answers in the time left.
+    settings = make_settings(
+        tmp_path,
+        swaps=(0, 0),
+        request_deadline_seconds=1.0,
+        alternate_reserve_seconds=0.5,
+        jev_timeout_seconds=0.2,
+    )
+    g = gateway(settings)
+    g.controller.record_semantic(SMALL, "wrong intents", can_disable=True)
+
+    async def hang(message: str):
+        await asyncio.sleep(10)
+
+    g.backends[1].generate = hang
+    reply = send(g, 1, COMPLEX)[0]
+    assert reply.trace.model == SMALL
+    assert reply.trace.fallback_reason == "selected_backend_error, semantic_last_resort"
+    assert g.usage[LARGE].failed_calls == 1
+    assert reply.trace.latency_ms < 1000

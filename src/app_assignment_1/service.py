@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, Literal
@@ -61,6 +61,10 @@ class BackendUnavailable(Exception):
     """No configured backend is available or able to answer."""
 
 
+class DeadlineExceeded(BackendUnavailable):
+    """The request deadline cut short the alternate backend's attempt."""
+
+
 def _jev_error_type(exc: Exception) -> str:
     """A short code for a failed Jev call. Never the exception's message."""
     if isinstance(exc, TimeoutError):
@@ -114,6 +118,8 @@ class Gateway:
             settings.jev_breaker_failures, settings.jev_breaker_cooldown_seconds, clock
         )
         self.rule_router = RuleRouter(settings.rule_router_complex_min_words)
+        self.request_deadline = settings.request_deadline_seconds
+        self.alternate_reserve = settings.alternate_reserve_seconds
         self.jev_timeout = settings.jev_timeout_seconds
         self.store = store or MemoryStore(settings.request_store_limit)
         # Each store write waits at most this long, so a database outage
@@ -221,14 +227,30 @@ class Gateway:
     async def chat(self, message: str) -> ChatResponse:
         try:
             response, jev = await self._chat(message)
-        finally:
+        except BaseException:
             # Interventions also happen on requests that end in a 503.
-            await self.save_interventions()
+            await self._finish(self.save_interventions())
+            raise
         # By now the failure monitor and the metrics have counted this reply,
-        # so a cancel must not stop the save: the saved requests would no
-        # longer match the counts. The save runs as its own task, and a cancel
-        # waits for it (store_timeout bounds the wait) before passing on.
-        save = asyncio.create_task(self._save_request(response, jev))
+        # so a cancel must not stop the saves: the saved requests would no
+        # longer match the counts, and the controller has already handed its
+        # interventions over. Both saves run as one task, in order.
+        await self._finish(self._save_all(response, jev))
+        return response
+
+    async def _save_all(
+        self, response: ChatResponse, jev: Sequence[JevAssessment]
+    ) -> None:
+        await self.save_interventions()
+        await self._save_request(response, jev)
+
+    async def _finish(self, saving: Coroutine[Any, Any, None]) -> None:
+        """Run a save as its own task. A cancel waits for it, then passes on.
+
+        store_timeout bounds each store call, not the whole wait: a save can
+        first queue on save_lock behind other intervention saves, so during a
+        store outage the k-th queued request waits about k * store_timeout."""
+        save = asyncio.create_task(saving)
         self.pending_saves.add(save)
         save.add_done_callback(self.pending_saves.discard)
         try:
@@ -236,7 +258,14 @@ class Gateway:
         except asyncio.CancelledError:
             await asyncio.wait({save})
             raise
-        return response
+
+    async def finish_saves(self) -> None:
+        """At shutdown, before the store closes: wait for saves still running,
+        such as those of requests the server cancelled, then save anything
+        noticed since the last request (a /metrics scrape can see a re-enable)."""
+        while self.pending_saves:
+            await asyncio.wait(set(self.pending_saves))
+        await self.save_interventions()
 
     async def _save_request(
         self, response: ChatResponse, jev: Sequence[JevAssessment]
@@ -353,16 +382,39 @@ class Gateway:
             return []
         return records
 
-    async def _generate(
-        self, backend: Backend, message: str, action: str | None
-    ) -> tuple[BackendReply | None, str | None]:
-        """Call one backend. Return its reply, or None if the call failed, and
-        the latest controller action."""
+    def _fallback_left(self, order: Sequence[Backend], current: Backend) -> bool:
+        """Another model could still answer after `current`: usable now, or a
+        last resort."""
+        return any(
+            b is not current
+            and b.config.available
+            and (self.usable(b) or self.controller.last_resort(b.config.name))
+            for b in order
+        )
+
+    async def _attempt(
+        self,
+        backend: Backend,
+        message: str,
+        budget: float,
+        attempt: int,
+        action: str | None,
+    ) -> tuple[BackendReply | None, str | None, bool]:
+        """Call one backend within `budget` seconds. Return its reply (None if
+        the call failed), the latest controller action, and whether the
+        deadline cut short a later attempt."""
         usage = self.usage[backend.config.name]
         usage.attempted_calls += 1
+        timer = asyncio.timeout(budget)
         try:
-            generated = BackendReply.model_validate(await backend.generate(message))
+            async with timer:
+                generated = BackendReply.model_validate(await backend.generate(message))
         except Exception as exc:
+            if timer.expired() and attempt > 1:
+                # A later attempt had a shortened opportunity. Do not score this
+                # as a model failure or a successful monitor sample.
+                usage.deadline_exceeded_calls += 1
+                return None, action, True
             usage.failed_calls += 1
             # A reply that fails BackendReply validation also counts as a call
             # error. Cancellation still propagates. Do not log input text or
@@ -370,14 +422,16 @@ class Gateway:
             logger.warning(
                 "Backend %s failed (%s)", backend.config.name, type(exc).__name__
             )
-            return None, (
+            return (
+                None,
                 self.controller.record_error(
                     backend.config.name, can_disable=self.others_usable(backend)
                 )
-                or action
+                or action,
+                False,
             )
         usage.completed_calls += 1
-        return generated, action
+        return generated, action, False
 
     async def _chat(self, message: str) -> tuple[ChatResponse, list[JevAssessment]]:
         # Created before any provider call, so later records can share it.
@@ -413,42 +467,68 @@ class Gateway:
         selected = next(b for b in self.backends if b.config.route == decision.route)
         order = (selected, *(b for b in self.backends if b is not selected))
         action = None
-        generated = None
+        generated: BackendReply | None = None
         tried: list[Backend] = []
-        for backend in order:
-            if not self.usable(backend):
-                if backend is selected:
-                    reasons.append(
-                        "selected_backend_disabled"
-                        if backend.config.available
-                        else "selected_backend_unavailable"
-                    )
-                continue
-            tried.append(backend)
-            generated, action = await self._generate(backend, message, action)
-            if generated is not None:
-                break
-            if backend is selected:
-                reasons.append("selected_backend_error")
-        if generated is None:
-            # No usable model answered. Try each model not called yet:
-            # - one whose cooldown ended while another model's call ran is
-            #   usable again;
-            # - one disabled only for wrong intents still gives a well-formed
-            #   reply, which beats a 503. The other model can start failing
-            #   after the semantic disable, and the controller cannot see that
-            #   coming.
+        deadline_exceeded = False
+        # Two passes. First, the models that are usable now. If none answered,
+        # every model not called yet:
+        # - one whose cooldown ended while another model's call ran is usable
+        #   again;
+        # - one disabled only for wrong intents still gives a well-formed
+        #   reply, which beats a 503. The other model can start failing after
+        #   the semantic disable, and the controller cannot see that coming.
+        for last_pass in (False, True):
             for backend in order:
-                if backend in tried or not backend.config.available:
+                if backend in tried:
                     continue
-                if not self.usable(backend):
-                    if not self.controller.last_resort(backend.config.name):
+                if not last_pass:
+                    if not self.usable(backend):
+                        if backend is selected:
+                            reasons.append(
+                                "selected_backend_disabled"
+                                if backend.config.available
+                                else "selected_backend_unavailable"
+                            )
                         continue
-                    reasons.append("semantic_last_resort")
+                else:
+                    if not backend.config.available:
+                        continue
+                    if not self.usable(backend):
+                        if not self.controller.last_resort(backend.config.name):
+                            continue
+                        reasons.append("semantic_last_resort")
+                remaining = self.request_deadline - (perf_counter() - start)
+                if remaining <= 0:
+                    deadline_exceeded = True
+                    break
+                # Hold back the reserve only on the first attempt, and only when
+                # another model, a last resort included, could still answer.
+                # Otherwise this is the last chance, so it gets all the time left.
+                budget = (
+                    remaining - self.alternate_reserve
+                    if not tried and self._fallback_left(order, backend)
+                    else remaining
+                )
+                if budget <= 0:
+                    deadline_exceeded = True
+                    break
                 tried.append(backend)
-                generated, action = await self._generate(backend, message, action)
+                generated, action, cut_short = await self._attempt(
+                    backend, message, budget, len(tried), action
+                )
                 if generated is not None:
                     break
+                if cut_short:
+                    deadline_exceeded = True
+                    break
+                if backend is selected and not last_pass:
+                    reasons.append("selected_backend_error")
+            if generated is not None or deadline_exceeded:
+                break
+        if deadline_exceeded:
+            self.metrics.chat_unavailable.inc()
+            self.metrics.chat_latency.observe(perf_counter() - start)
+            raise DeadlineExceeded
         if generated is None:
             self.metrics.chat_unavailable.inc()
             self.metrics.chat_latency.observe(perf_counter() - start)
