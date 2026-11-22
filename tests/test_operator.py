@@ -65,7 +65,7 @@ def test_operator_routes_are_off_without_a_token(tmp_path, path, body):
     settings = make_settings(tmp_path, operator_token=None)
     with TestClient(create_app(settings)) as client:
         response = client.post(path, json=body, headers=AUTH)
-        assert response.status_code == 503
+        assert response.status_code == 403
         assert "APP_OPERATOR_TOKEN" in response.json()["detail"]
         assert client.get("/v1/health").json()["status"] == "ok"
 
@@ -87,11 +87,33 @@ def test_operator_routes_need_the_token(client, path, body, headers):
 
 
 def test_operator_token_must_be_long():
-    with pytest.raises(ValidationError, match="at least 32 characters"):
-        Settings(_env_file=None, operator_token="short")
-    assert Settings(_env_file=None, operator_token="").operator_token is None
+    with pytest.raises(ValidationError, match="at least 16 characters"):
+        Settings(_env_file=None, operator_token="x" * 15)
+    with pytest.raises(ValidationError, match="at least 16 characters"):
+        Settings(_env_file=None, operator_token=" " * 10 + "x" * 15 + " " * 10)
+    assert Settings(_env_file=None, operator_token="x" * 16).operator_token
     settings = Settings(_env_file=None, operator_token=TOKEN)
     assert TOKEN not in repr(settings)
+
+
+@pytest.mark.parametrize("blank", ["", " " * 32, "\t\n"])
+def test_a_blank_operator_token_turns_the_routes_off(blank):
+    assert Settings(_env_file=None, operator_token=blank).operator_token is None
+
+
+def test_spaces_around_the_operator_token_are_dropped(tmp_path):
+    settings = make_settings(tmp_path, operator_token=f"  {TOKEN}  ")
+    assert settings.operator_token is not None
+    assert settings.operator_token.get_secret_value() == TOKEN
+    with TestClient(create_app(settings)) as client:
+        response = client.post(f"/v1/operator/models/{SMALL}/disable", headers=AUTH)
+        assert response.status_code == 200
+
+
+def test_the_bearer_scheme_is_case_insensitive(client):
+    headers = {"Authorization": f"bearer {TOKEN}"}
+    response = client.post(f"/v1/operator/models/{SMALL}/disable", headers=headers)
+    assert response.status_code == 200
 
 
 # --- disable and enable ---

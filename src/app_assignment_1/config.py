@@ -59,8 +59,8 @@ class Settings(BaseSettings):
     jev_input_price_per_million_usd: float | None = Field(default=None, ge=0)
     jev_breaker_failures: int = Field(default=5, ge=1, le=1000)
     jev_breaker_cooldown_seconds: float = Field(default=30, gt=0, le=3600)
-    # Bearer token for the /v1/operator and /v1/faults routes. Unset: those
-    # routes answer 503. Set it only in the real env file, never in Git.
+    # Bearer token for the operator routes (auth.py). Unset, empty or blank:
+    # they answer 403. Set it only in the real env file, never in Git.
     operator_token: SecretStr | None = None
     request_deadline_seconds: float = Field(default=45, gt=0, le=600)
     alternate_reserve_seconds: float = Field(default=15, gt=0, le=600)
@@ -102,16 +102,16 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def operator_token_is_long(self) -> "Settings":
-        if (
-            self.operator_token is not None
-            and not self.operator_token.get_secret_value()
-        ):
+        if self.operator_token is None:
+            return self
+        # The header value is stripped before the compare, so strip the token.
+        value = self.operator_token.get_secret_value().strip()
+        if not value:
             self.operator_token = None
-        if (
-            self.operator_token is not None
-            and len(self.operator_token.get_secret_value()) < 32
-        ):
-            raise ValueError("APP_OPERATOR_TOKEN must be at least 32 characters")
+        elif len(value) < 16:
+            raise ValueError("APP_OPERATOR_TOKEN must be at least 16 characters")
+        else:
+            self.operator_token = SecretStr(value)
         return self
 
     @model_validator(mode="after")

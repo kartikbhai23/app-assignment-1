@@ -1,16 +1,13 @@
 """Smart AI Gateway mocked midpoint API."""
 
-import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import CONTENT_TYPE_LATEST
-from pydantic import SecretStr
 
+from app_assignment_1.auth import require_operator
 from app_assignment_1.config import Settings, get_settings
 from app_assignment_1.router import MockJevRouter, Router
 from app_assignment_1.schemas import (
@@ -32,25 +29,6 @@ from app_assignment_1.service import (
     NotAMock,
 )
 from app_assignment_1.store import Store, create_store
-
-bearer = HTTPBearer(auto_error=False)
-
-
-def require_operator(
-    request: Request,
-    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
-) -> None:
-    """Allow a request only with `Authorization: Bearer <APP_OPERATOR_TOKEN>`."""
-    token: SecretStr | None = request.app.state.operator_token
-    if token is None:
-        raise HTTPException(
-            503, "Operator routes are off: APP_OPERATOR_TOKEN is not set"
-        )
-    given = credentials.credentials if credentials else ""
-    if not secrets.compare_digest(given.encode(), token.get_secret_value().encode()):
-        raise HTTPException(
-            401, "Missing or wrong operator token", {"WWW-Authenticate": "Bearer"}
-        )
 
 
 def create_app(
