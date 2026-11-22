@@ -141,9 +141,9 @@ components:
     tag: ":5432"
     owner: Sebastian
     items:
-      - built: "Requests, Jev assessments and interventions; survive a gateway restart"
+      - built: "Requests and controller interventions; survive a gateway restart"
       - built: Versioned SQL migrations at startup; no published port
-      - todo: Controller state, release history
+      - todo: Monitor records, controller state, release history
       - simulated: "Tests and native runs: memory store, resets on restart"
 
   configuration:
@@ -193,7 +193,7 @@ components:
     owner: Jackson
     style: stretch
     items:
-      - todo: Skeleton and gate check
+      - built: Skeleton and gate check
       - todo: Load Qwen3-1.7B outside vLLM; real activations
       - todo: Gate run due Friday, November 20
 
