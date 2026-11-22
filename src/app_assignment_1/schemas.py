@@ -128,6 +128,23 @@ class BackendMonitor(StrictModel):
     disabled_for_seconds: float | None = Field(default=None, ge=0)
 
 
+class MonitorSample(StrictModel):
+    """One sample in a monitor window, saved so the windows survive a restart.
+
+    `failure`: the controller's outcome for one call (ok, format_failure or
+    call_error). `semantic`: one reply scored against Jev (agree, disagree or
+    no_signal), with `traffic` own or rerouted. No message text.
+    """
+
+    at: datetime
+    model: BackendName
+    monitor: Literal["failure", "semantic"]
+    outcome: Literal[
+        "ok", "format_failure", "call_error", "agree", "disagree", "no_signal"
+    ]
+    traffic: Literal["own", "rerouted"] | None = None
+
+
 class Intervention(StrictModel):
     at: datetime
     backend: BackendName

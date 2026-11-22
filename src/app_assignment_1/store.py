@@ -9,7 +9,7 @@ Neither store keeps the customer's message: `ChatResponse` has no message field.
 """
 
 import logging
-from collections import OrderedDict, deque
+from collections import Counter, OrderedDict, deque
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
@@ -21,7 +21,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from app_assignment_1.config import PUBLIC_DATABASE_PASSWORD, Settings
 from app_assignment_1.records import JevAssessment
-from app_assignment_1.schemas import ChatResponse, Intervention
+from app_assignment_1.schemas import ChatResponse, Intervention, MonitorSample
 
 logger = logging.getLogger(__name__)
 MIGRATIONS = Path(__file__).parent / "migrations"
@@ -62,6 +62,13 @@ class Store(Protocol):
         """The last `limit` interventions, oldest first."""
         ...
 
+    async def save_monitor_samples(self, items: Sequence[MonitorSample]) -> None: ...
+
+    async def recent_monitor_samples(self, per_window: int) -> list[MonitorSample]:
+        """The newest `per_window` samples of each model's window (per model,
+        monitor and traffic), oldest first."""
+        ...
+
 
 class MemoryStore:
     """Bounded, process-local history. Resets when the gateway restarts."""
@@ -72,6 +79,8 @@ class MemoryStore:
         self.interventions: deque[Intervention] = deque(maxlen=intervention_limit)
         # Two per request, so this keeps about as many calls as requests.
         self.jev_assessments: deque[JevAssessment] = deque(maxlen=2 * limit)
+        # About two per request: a failure sample and a semantic one.
+        self.monitor_samples: deque[MonitorSample] = deque(maxlen=4 * limit)
 
     async def open(self) -> None:
         pass
@@ -98,6 +107,19 @@ class MemoryStore:
 
     async def recent_interventions(self, limit: int) -> list[Intervention]:
         return list(self.interventions)[-limit:] if limit > 0 else []
+
+    async def save_monitor_samples(self, items: Sequence[MonitorSample]) -> None:
+        self.monitor_samples.extend(items)
+
+    async def recent_monitor_samples(self, per_window: int) -> list[MonitorSample]:
+        kept: list[MonitorSample] = []
+        counts: Counter[tuple[str, str, str | None]] = Counter()
+        for sample in reversed(self.monitor_samples):
+            key = (sample.model, sample.monitor, sample.traffic)
+            if counts[key] < per_window:
+                counts[key] += 1
+                kept.append(sample)
+        return kept[::-1]
 
 
 class PostgresStore:
@@ -234,6 +256,40 @@ class PostgresStore:
         return [
             Intervention(at=at, backend=backend, action=action, reason=reason)
             for at, backend, action, reason in rows
+        ]
+
+    async def save_monitor_samples(self, items: Sequence[MonitorSample]) -> None:
+        if not items:
+            return
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.executemany(
+                    "INSERT INTO monitor_samples (at, model, monitor, outcome, traffic)"
+                    " VALUES (%s, %s, %s, %s, %s)",
+                    [(s.at, s.model, s.monitor, s.outcome, s.traffic) for s in items],
+                )
+
+    async def recent_monitor_samples(self, per_window: int) -> list[MonitorSample]:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                SELECT at, model, monitor, outcome, traffic FROM (
+                    SELECT *, row_number() OVER (
+                        PARTITION BY model, monitor, traffic ORDER BY seq DESC
+                    ) AS newest
+                    FROM monitor_samples
+                ) AS ranked
+                WHERE newest <= %s
+                ORDER BY seq
+                """,
+                (per_window,),
+            )
+            rows = await cur.fetchall()
+        return [
+            MonitorSample(
+                at=at, model=model, monitor=monitor, outcome=outcome, traffic=traffic
+            )
+            for at, model, monitor, outcome, traffic in rows
         ]
 
 

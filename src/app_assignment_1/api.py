@@ -35,6 +35,7 @@ def create_app(
             store=opened,
         )
         await opened.open()
+        await gateway.restore()
         app.state.gateway = gateway
         try:
             yield

@@ -1,13 +1,15 @@
 """In-memory failure monitor and controller for the backends.
 
-Windows and disabled backends live in the gateway process and reset on restart.
+Windows and disabled backends live in the gateway process. Each window sample
+is saved through `Store` (`unsaved_samples`), and `restore` rebuilds the windows
+and running cooldowns at startup, so with Postgres they survive a restart.
 The gateway saves each intervention to its store (see store.py), which may be
 Postgres; `unsaved` holds the ones it has not saved yet.
 """
 
 import time
 from collections import Counter, deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -17,9 +19,11 @@ from app_assignment_1.schemas import (
     BackendName,
     ControllerRules,
     Intervention,
+    MonitorSample,
 )
 
 Outcome = Literal["ok", "format_failure", "call_error"]
+OUTCOMES: tuple[Outcome, ...] = ("ok", "format_failure", "call_error")
 
 
 class Controller:
@@ -52,6 +56,9 @@ class Controller:
         # Every intervention since start; the log above keeps only the latest.
         self.action_counts: Counter[tuple[str, BackendName]] = Counter()
         self.unsaved: list[Intervention] = []
+        # New window samples, waiting for the gateway to save them, so the
+        # windows can be rebuilt after a restart (see `restore`).
+        self.unsaved_samples: list[MonitorSample] = []
 
     def _note(
         self,
@@ -93,6 +100,11 @@ class Controller:
     ) -> str | None:
         window = self.windows[name]
         window.append(outcome)
+        self.unsaved_samples.append(
+            MonitorSample(
+                at=datetime.now(UTC), model=name, monitor="failure", outcome=outcome
+            )
+        )
         failures = sum(item != "ok" for item in window)
         rate = failures / len(window)
         if len(window) < self.min_samples or rate < self.threshold:
@@ -119,6 +131,45 @@ class Controller:
         self.disabled_until[name] = self.clock() + self.cooldown
         self._note(name, "disabled", reason)
         return f"disabled {name}: {reason}"
+
+    def restore(
+        self,
+        interventions: Sequence[Intervention],
+        samples: Sequence[MonitorSample],
+        now: datetime,
+    ) -> None:
+        """Rebuild the windows and cooldowns after a restart.
+
+        A cooldown still running when the gateway stopped resumes for the time
+        left. A re-enable clears a model's window, so only samples after its
+        last re-enable go back in, or after a disable whose cooldown has since
+        ended. `interventions` and `samples` are oldest first.
+        """
+        for name, window in self.windows.items():
+            events = [
+                i
+                for i in interventions
+                if i.backend == name and i.action in ("disabled", "re-enabled")
+            ]
+            cutoff: datetime | None = None
+            if events:
+                last = events[-1]
+                left = self.cooldown - (now - last.at).total_seconds()
+                if last.action == "disabled" and left > 0:
+                    self.disabled_until[name] = self.clock() + left
+                    enabled = [e for e in events if e.action == "re-enabled"]
+                    cutoff = enabled[-1].at if enabled else None
+                else:
+                    cutoff = last.at
+            outcomes = [
+                s.outcome
+                for s in samples
+                if s.model == name
+                and s.monitor == "failure"
+                and (cutoff is None or s.at > cutoff)
+            ]
+            window.clear()
+            window.extend(o for o in outcomes if o in OUTCOMES)
 
     def rules(self) -> ControllerRules:
         return ControllerRules(

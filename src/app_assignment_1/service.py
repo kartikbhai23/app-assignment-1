@@ -36,6 +36,9 @@ from app_assignment_1.store import MemoryStore, Store
 logger = logging.getLogger(__name__)
 QUESTIONS: tuple[Literal["route", "intent"], ...] = ("route", "intent")
 MAX_REPLY_LENGTH = 4000
+# Enough of the intervention log to find each model's last disable and
+# re-enable when restoring after a restart.
+RESTORE_INTERVENTIONS = 500
 # For a recognized intent that has no policy card. The backend sends an empty
 # reply for these; the gateway never shows generated text for them.
 UNCARDED_REPLY = (
@@ -175,7 +178,52 @@ class Gateway:
         return any(self.usable(b) for b in self.backends if b is not backend)
 
     async def save_interventions(self) -> None:
-        """Move the controller's new interventions to the store, in order."""
+        """Move the controller's new interventions to the store, in order,
+        then the new monitor samples."""
+        await self._save_interventions()
+        await self._save_samples()
+
+    async def _save_samples(self) -> None:
+        """Save new window samples. On failure they are dropped, not retried:
+        the live windows are unaffected, and a later restart just rebuilds
+        from fewer samples."""
+        samples = self.controller.unsaved_samples + self.semantic.unsaved
+        if not samples:
+            return
+        self.controller.unsaved_samples, self.semantic.unsaved = [], []
+        samples.sort(key=lambda s: s.at)
+        try:
+            await asyncio.wait_for(
+                self.store.save_monitor_samples(samples), self.store_timeout
+            )
+        except Exception as exc:
+            logger.warning("Could not save monitor samples (%s)", type(exc).__name__)
+
+    async def restore(self) -> None:
+        """Rebuild the monitor windows and running cooldowns from the store,
+        at startup. A store problem is logged, and the windows start empty."""
+        per_window = max(self.controller.window, self.semantic.rules.window)
+        try:
+            interventions = await asyncio.wait_for(
+                self.store.recent_interventions(RESTORE_INTERVENTIONS),
+                self.store_timeout,
+            )
+            samples = await asyncio.wait_for(
+                self.store.recent_monitor_samples(per_window), self.store_timeout
+            )
+        except Exception as exc:
+            logger.warning("Could not restore monitor state (%s)", type(exc).__name__)
+            return
+        self.controller.restore(interventions, samples, datetime.now(UTC))
+        self.semantic.restore(samples)
+        if samples or self.controller.disabled_until:
+            logger.info(
+                "Restored %d monitor samples; %d model(s) still cooling down",
+                len(samples),
+                len(self.controller.disabled_until),
+            )
+
+    async def _save_interventions(self) -> None:
         if not self.controller.unsaved:
             return
         # One save at a time: a failed batch goes back in front of newer ones,

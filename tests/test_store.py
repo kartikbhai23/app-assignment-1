@@ -28,9 +28,10 @@ from app_assignment_1.api import create_app
 from app_assignment_1.config import PUBLIC_DATABASE_PASSWORD, Settings
 from app_assignment_1.records import JevAssessment
 from app_assignment_1.router import MockJevRouter
-from app_assignment_1.schemas import ChatResponse, Intervention, Trace
+from app_assignment_1.schemas import ChatResponse, Intervention, MonitorSample, Trace
 from app_assignment_1.service import Gateway
 from app_assignment_1.store import (
+    MIGRATIONS,
     MemoryStore,
     PostgresStore,
     Store,
@@ -309,15 +310,15 @@ def test_migrations_run_once(postgres_url: str) -> None:
             second = await migrate(conn)
             cur = await conn.execute("SELECT version, name FROM schema_migrations")
             rows = await cur.fetchall()
-        assert first == [
+        # Every file in migrations/, in order, so a new migration needs no edit.
+        files = sorted(path.name for path in MIGRATIONS.glob("*.sql"))
+        assert files[:2] == [
             "001_requests_and_interventions.sql",
             "002_jev_assessments.sql",
         ]
+        assert first == files
         assert second == []
-        assert sorted(rows) == [
-            (1, "001_requests_and_interventions.sql"),
-            (2, "002_jev_assessments.sql"),
-        ]
+        assert sorted(rows) == [(int(name.split("_", 1)[0]), name) for name in files]
 
     asyncio.run(main())
 
@@ -528,3 +529,61 @@ def test_shutdown_saves_pending_interventions() -> None:
         # As if a /metrics scrape had noticed a re-enable after the last request.
         client.app.state.gateway.controller.unsaved.append(intervention(0))
     assert list(store.interventions) == [intervention(0)]
+
+
+def test_monitor_samples_keep_the_newest_per_window(make_store: MakeStore) -> None:
+    start = datetime(2026, 11, 22, 12, tzinfo=UTC)
+    samples = [
+        MonitorSample(
+            at=start + timedelta(seconds=i),
+            model="qwen3-1.7b",
+            monitor="failure",
+            outcome="call_error" if i == 0 else "ok",
+        )
+        for i in range(4)
+    ] + [
+        MonitorSample(
+            at=start + timedelta(seconds=10),
+            model="qwen3-1.7b",
+            monitor="semantic",
+            outcome="disagree",
+            traffic="own",
+        ),
+        MonitorSample(
+            at=start + timedelta(seconds=11),
+            model="qwen3-4b",
+            monitor="semantic",
+            outcome="agree",
+            traffic="rerouted",
+        ),
+    ]
+
+    async def body(store: Store) -> None:
+        await store.save_monitor_samples(samples[:3])
+        await store.save_monitor_samples(samples[3:])
+        newest = await store.recent_monitor_samples(per_window=2)
+        # The oldest failure sample drops out; the rest come back oldest first.
+        assert newest == samples[2:]
+
+    run(make_store(), body)
+
+
+def test_a_restarted_app_resumes_from_postgres(postgres_url: str) -> None:
+    settings = Settings(
+        _env_file=None,
+        store="postgres",
+        database_url=postgres_url,
+        backends_path=Path("config/backends.chaos.json"),
+    )
+    with TestClient(create_app(settings)) as client:
+        for _ in range(5):
+            client.post("/v1/chat", json={"message": "my card has not arrived"})
+        before = client.get("/v1/health").json()
+    with TestClient(create_app(settings)) as client:
+        after = client.get("/v1/health").json()
+    small = {m["name"]: m for m in after["monitor"]}["qwen3-1.7b"]
+    assert small["disabled_by_controller"] is True
+    assert small["format_failures"] == 5
+    assert [m["samples"] for m in after["monitor"]] == [
+        m["samples"] for m in before["monitor"]
+    ]

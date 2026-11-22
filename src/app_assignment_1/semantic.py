@@ -14,18 +14,25 @@ Failed format checks and failed calls give no sample here; the failure monitor
 in monitor.py counts them. A model serving the other route's traffic sees
 different messages, so those samples are kept apart from its own window.
 
-The windows live in the gateway process and reset on restart, like the failure
-monitor's. The rules follow the scoring table drafted in PR #45. The baseline,
+The windows live in the gateway process. Each sample is also saved through
+`Store`, so with Postgres the gateway rebuilds them after a restart, like the
+failure monitor's. The rules follow the scoring table drafted in PR #45. The baseline,
 margin and coverage minimum are placeholders until they are set from dev data.
 """
 
 from collections import deque
 from collections.abc import Iterable, Sequence
+from datetime import UTC, datetime
 from typing import Literal
 
 from app_assignment_1.config import Settings
 from app_assignment_1.records import JevAssessment
-from app_assignment_1.schemas import BackendName, SemanticRules, SemanticStatus
+from app_assignment_1.schemas import (
+    BackendName,
+    MonitorSample,
+    SemanticRules,
+    SemanticStatus,
+)
 
 Sample = Literal["agree", "disagree", "no_signal"]
 SAMPLES: tuple[Sample, ...] = ("agree", "disagree", "no_signal")
@@ -63,6 +70,8 @@ class SemanticMonitor:
         self.rerouted: dict[BackendName, deque[Sample]] = {
             name: deque(maxlen=settings.semantic_window) for name in names
         }
+        # New samples, waiting for the gateway to save them.
+        self.unsaved: list[MonitorSample] = []
         self.rules = SemanticRules(
             window=settings.semantic_window,
             min_samples=settings.semantic_min_samples,
@@ -73,6 +82,34 @@ class SemanticMonitor:
 
     def record(self, name: BackendName, sample: Sample, rerouted: bool) -> None:
         (self.rerouted if rerouted else self.windows)[name].append(sample)
+        self.unsaved.append(
+            MonitorSample(
+                at=datetime.now(UTC),
+                model=name,
+                monitor="semantic",
+                outcome=sample,
+                traffic="rerouted" if rerouted else "own",
+            )
+        )
+
+    def restore(self, samples: Sequence[MonitorSample]) -> None:
+        """Rebuild both windows after a restart from saved samples, oldest
+        first. Each window keeps only its newest samples."""
+        for name in self.windows:
+            for traffic, windows in (
+                ("own", self.windows),
+                ("rerouted", self.rerouted),
+            ):
+                window = windows[name]
+                window.clear()
+                window.extend(
+                    s.outcome
+                    for s in samples
+                    if s.model == name
+                    and s.monitor == "semantic"
+                    and s.traffic == traffic
+                    and s.outcome in SAMPLES
+                )
 
     def stats(self) -> list[SemanticStatus]:
         return [self._status(name) for name in self.windows]
