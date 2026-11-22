@@ -236,9 +236,14 @@ class Gateway:
                 await asyncio.wait_for(
                     self.store.save_interventions(items), self.store_timeout
                 )
-            except Exception as exc:
+            except BaseException as exc:
                 # Keep them for the next attempt; the controller is unaffected.
+                # A cancel, such as a /v1/health call whose client left, keeps
+                # them too, then passes on. (Chat saves run in a shielded task
+                # and are never cancelled here.)
                 self.controller.unsaved = items + self.controller.unsaved
+                if not isinstance(exc, Exception):
+                    raise
                 logger.warning("Could not save interventions (%s)", type(exc).__name__)
 
     async def chat(self, message: str) -> ChatResponse:

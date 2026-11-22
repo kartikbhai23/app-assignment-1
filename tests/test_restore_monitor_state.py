@@ -149,3 +149,32 @@ def test_a_restart_rebuilds_the_semantic_windows():
     second = gateway(settings, store)
     asyncio.run(second.restore())
     assert second.semantic.stats() == before
+
+
+def test_a_cancelled_intervention_save_keeps_the_interventions():
+    # /v1/health calls save_interventions directly, outside the shielded chat
+    # save, so its client leaving can cancel the save (review of #92).
+    class Slow(MemoryStore):
+        async def save_interventions(self, items):
+            await asyncio.sleep(10)
+
+    settings = Settings(_env_file=None)
+    g = gateway(settings, Slow(settings.request_store_limit))
+    for _ in range(5):
+        g.controller.record_error(SMALL, can_disable=True)
+    pending = list(g.controller.unsaved)
+    assert pending
+
+    async def go() -> None:
+        task = asyncio.create_task(g.save_interventions())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("the cancel must pass on")
+
+    asyncio.run(go())
+    assert g.controller.unsaved == pending
