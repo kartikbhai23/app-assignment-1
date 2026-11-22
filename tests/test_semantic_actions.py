@@ -1,8 +1,8 @@
 """Controller actions from the semantic monitor (APP_SEMANTIC_ACTIONS_ENABLED)."""
 
 import asyncio
-import random
 import json
+import random
 from pathlib import Path
 
 import pytest
