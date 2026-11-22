@@ -79,10 +79,10 @@ components:
     title: Backend client
     owner: "Verness · Yanzhen: vLLM client"
     items:
-      - built: "Fallback; both down: 503"
+      - built: "Fallback with budgets; both down: 503"
       - built: vLLM client (not wired in)
       - simulated: Gateway uses mocks
-      - todo: Gateway wiring; 45 s deadline
+      - todo: Gateway wiring; typed failures
 
   format_validation:
     title: Format validation
@@ -142,9 +142,9 @@ components:
     tag: ":5432"
     owner: Sebastian
     items:
-      - built: "Requests and controller interventions; survive a gateway restart"
+      - built: "Requests, interventions and Jev assessments; survive a restart"
       - built: Versioned SQL migrations at startup; no published port
-      - todo: Monitor records, controller state, release history
+      - todo: Reload monitor state, controller state, release history
       - simulated: "Tests and native runs: memory store, resets on restart"
 
   configuration:
@@ -194,7 +194,7 @@ components:
     items:
       - built: Skeleton and gate check
       - todo: Load Qwen3-1.7B outside vLLM; real activations
-      - todo: Gate run due Friday, November 20
+      - todo: Gate run a week after the GPU host and dev split
 
   ci:
     title: CI smoke tests (GitHub Actions)
@@ -257,7 +257,7 @@ layout:
     semantic_monitor: [855, 850, 225, 205]
     controller: [1090, 850, 225, 205]
     prometheus: [300, 690, 270, 225]
-    postgres: [300, 930, 270, 240]
+    postgres: [300, 930, 270, 260]
     configuration: [620, 1110, 685, 190]
     vllm_small: [1420, 225, 370, 140]
     vllm_large: [1420, 385, 370, 140]
