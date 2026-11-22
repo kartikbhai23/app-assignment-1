@@ -1,6 +1,7 @@
 """Controller actions from the semantic monitor (APP_SEMANTIC_ACTIONS_ENABLED)."""
 
 import asyncio
+import random
 import json
 from pathlib import Path
 
@@ -417,10 +418,11 @@ def test_only_a_semantic_disable_is_a_last_resort(tmp_path):
     # Its failing window already rules it out; the reason rules it out too.
     c.windows[LARGE].clear()
     assert not c.last_resort(LARGE)
-    # A semantically disabled model that fails its own calls is no help.
+    # Failing some of its own calls does not take it out: it is the last model
+    # that can answer, and excluding it would freeze its window.
     for _ in range(5):
         c.record_error(SMALL, can_disable=False)
-    assert not c.last_resort(SMALL)
+    assert c.last_resort(SMALL)
     clock.now = 31
     stats = c.stats()  # re-enables both
     assert [m.disabled_for for m in stats] == [None, None]
@@ -436,3 +438,74 @@ def test_health_reports_answering(tmp_path):
     assert answering == {SMALL: False, LARGE: False}
     answering = {m["name"]: m["answering"] for m in after["monitor"]}
     assert answering == {SMALL: False, LARGE: True}
+
+
+def flaky_small_run(tmp_path, enabled: bool) -> tuple[int, list[int], Gateway]:
+    """The third review's case: the small model gives wrong intents and fails
+    some of its calls, and the large model fails every call from request 40.
+    200 requests 0.25 s apart, every 2nd complex, cooldown 61 s, seeded mocks.
+    The review used 30% errors with its own seeds; with these seeds, 45% is
+    what pushes the small model's window over the threshold. Returns the 503s
+    and the small model's calls per request after the outage."""
+    clock = Clock()
+    settings = make_settings(
+        tmp_path,
+        swaps=(1, 0),
+        errors=(0.45, 0),
+        semantic_window=50,
+        semantic_min_samples=10,
+        semantic_alert_margin=0.15,
+        semantic_actions_enabled=enabled,
+        controller_cooldown_seconds=61,
+    )
+    g = gateway(settings, clock)
+    for seed, backend in enumerate(g.backends):
+        backend.rng = random.Random(seed)
+    unavailable, small_calls = 0, []
+    for i in range(200):
+        clock.now = i * 0.25
+        if i == 40:
+            g.backends[1].config.error_rate = 1
+        g.controller.stats()
+        before = g.usage[SMALL].attempted_calls
+        message = COMPLEX if i % 2 else STANDARD
+        unavailable += chat_or_503(g, message) == "503"
+        if i >= 40:
+            small_calls.append(g.usage[SMALL].attempted_calls - before)
+    return unavailable, small_calls, g
+
+
+def test_a_flaky_last_resort_keeps_answering(tmp_path):
+    # Before the fix, the last resort was dropped once its own failure rate
+    # reached the threshold, and every later request was a 503 (117 of 200
+    # in the review, against 39 with actions off; 132 against 67 here).
+    off, off_calls, _ = flaky_small_run(tmp_path, enabled=False)
+    on, on_calls, g = flaky_small_run(tmp_path, enabled=True)
+    assert (SMALL, "disabled") in {(b, a) for b, a, _ in actions(g)}
+    # After the outage, every request still calls the small model once,
+    # whether it is enabled or a last resort.
+    assert set(off_calls) == {1}
+    assert set(on_calls) == {1}
+    # So the 503s come only from the small model's own errors.
+    assert on <= off + 10
+
+
+def test_a_cooldown_that_ends_during_another_call_is_used(tmp_path):
+    # The small model is disabled until t = 30. A request at t = 29 skips it,
+    # and the large model fails at t = 30.5, after the cooldown ended.
+    clock = Clock()
+    g = gateway(make_settings(tmp_path, swaps=(0, 0)), clock)
+    g.controller.record_semantic(SMALL, "wrong intents", can_disable=True)
+    large = g.backends[1]
+
+    async def slow_failure(message: str):
+        clock.now = 30.5
+        raise TimeoutError("slow")
+
+    large.generate = slow_failure
+    clock.now = 29
+    reply = send(g)[0]
+    assert reply.trace.model == SMALL
+    # Re-enabled, not a last resort.
+    assert reply.trace.fallback_reason == "selected_backend_disabled"
+    assert not g.controller.is_disabled(SMALL)

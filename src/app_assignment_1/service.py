@@ -414,6 +414,7 @@ class Gateway:
         order = (selected, *(b for b in self.backends if b is not selected))
         action = None
         generated = None
+        tried: list[Backend] = []
         for backend in order:
             if not self.usable(backend):
                 if backend is selected:
@@ -423,23 +424,28 @@ class Gateway:
                         else "selected_backend_unavailable"
                     )
                 continue
+            tried.append(backend)
             generated, action = await self._generate(backend, message, action)
             if generated is not None:
                 break
             if backend is selected:
                 reasons.append("selected_backend_error")
         if generated is None:
-            # No usable model answered. A model disabled only for wrong intents
-            # still gives a well-formed reply, which beats a 503: the other
-            # model can start failing after the semantic disable, and the
-            # controller cannot see that coming.
+            # No usable model answered. Try each model not called yet:
+            # - one whose cooldown ended while another model's call ran is
+            #   usable again;
+            # - one disabled only for wrong intents still gives a well-formed
+            #   reply, which beats a 503. The other model can start failing
+            #   after the semantic disable, and the controller cannot see that
+            #   coming.
             for backend in order:
-                if not (
-                    backend.config.available
-                    and self.controller.last_resort(backend.config.name)
-                ):
+                if backend in tried or not backend.config.available:
                     continue
-                reasons.append("semantic_last_resort")
+                if not self.usable(backend):
+                    if not self.controller.last_resort(backend.config.name):
+                        continue
+                    reasons.append("semantic_last_resort")
+                tried.append(backend)
                 generated, action = await self._generate(backend, message, action)
                 if generated is not None:
                     break

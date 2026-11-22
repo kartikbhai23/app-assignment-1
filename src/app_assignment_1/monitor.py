@@ -135,15 +135,13 @@ class Controller:
         return bool(self.windows[name]) and not self._failing(name)
 
     def last_resort(self, name: BackendName) -> bool:
-        """The model is disabled only because its intents differ from Jev's,
-        and its own failure rate is below the threshold. The gateway still
-        calls it when no other model answers: a reply with a possibly wrong
-        intent is better than a 503."""
-        return (
-            self.is_disabled(name)
-            and self.disabled_for.get(name) == "semantic"
-            and not self._failing(name)
-        )
+        """The model is disabled only because its intents differ from Jev's.
+        The gateway still calls it when no other model answers: a reply with a
+        possibly wrong intent is better than a 503. Its own failure rate does
+        not matter, as for an enabled model that is the last one left: a model
+        that answers some calls beats a certain 503, and excluding it would
+        freeze its window until the cooldown ends."""
+        return self.is_disabled(name) and self.disabled_for.get(name) == "semantic"
 
     def record_semantic(
         self, name: BackendName, reason: str | None, can_disable: bool
