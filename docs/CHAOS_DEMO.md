@@ -11,12 +11,12 @@ docker compose -f compose.yml -f compose.demo.yml up -d --build --wait
 python3 scripts/smoke_compose.py http://localhost:8080   # optional check
 ```
 
-`compose.demo.yml` sets a public throwaway operator token (the script knows it), the mock semantic baseline of 0, semantic actions on, and a 30 second cooldown. Open the Health screen at `http://localhost:8080/#/health` on the projector and keep it visible; it refreshes every 5 seconds.
+`compose.demo.yml` sets a public throwaway operator token (the script knows it), the mock semantic baseline of 0, semantic actions on, and a 20 second cooldown. Open the Health screen at `http://localhost:8080/#/health` on the projector and keep it visible; it refreshes every 5 seconds.
 
 ## Run it
 
 ```bash
-python3 scripts/chaos_demo.py                  # all three scenarios; each waits out the 30 second cooldown
+python3 scripts/chaos_demo.py                  # all three scenarios; each waits out the 20 second cooldown
 python3 scripts/chaos_demo.py --scenario outage
 python3 scripts/chaos_demo.py --prometheus     # also query Prometheus while each model is disabled
 ```
@@ -31,7 +31,7 @@ Scenarios: `bad_format`, `outage`, `label_swap`. Each one clears every fault, li
 | `outage` | Every call to the small model raises an error | Every request is still answered, by `qwen3-4b`, with `selected_backend_error`; the fifth line shows `CONTROLLER: disabled` | Failure monitor (call errors) |
 | `label_swap` | Small model answers well-formed replies for the wrong intent | Every format check passes, so the failure monitor sees nothing; after ten replies the semantic monitor sees the intents disagree with Jev's, and the controller disables the model | Semantic monitor |
 
-After the disable, the script clears the fault (after the Prometheus snapshot, with `--prometheus`) and keeps sending the same message every two seconds. Replies keep coming from `qwen3-4b` until the cooldown ends, then `qwen3-1.7b` answers again (the controller re-enables a model when it next checks, so it takes a request to notice).
+After the disable, the script clears the fault and keeps sending the same message every two seconds. Replies keep coming from `qwen3-4b` until the cooldown ends, then `qwen3-1.7b` answers again (the controller re-enables a model when it next checks, so it takes a request to notice).
 
 At the end the script prints the messages and seconds it measured in that run. "To recover" runs from the disable until `qwen3-1.7b` answers again, so it is about the cooldown. They come from one run on mocks with a 20 second cooldown. Quote them as that, not as averages or as real-model results.
 

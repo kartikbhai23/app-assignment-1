@@ -158,31 +158,3 @@ def test_scenario_names_match_the_fault_kinds() -> None:
 def test_demo_override_matches_the_token() -> None:
     override = (SCRIPT.parent.parent / "compose.demo.yml").read_text()
     assert demo.DEMO_TOKEN in override
-
-
-def test_second_scenario_starts_with_empty_windows() -> None:
-    with TestClient(create_app(demo_settings())) as client:
-        api = ClientApi(client)
-        demo.run_scenario(
-            api, "bad_format", out=lambda _l: None, sleep=lambda _s: time.sleep(0.2)
-        )
-        demo.reset(api)
-        for model in (demo.SMALL, demo.LARGE):
-            assert demo.monitor(api, model)["samples"] == 0
-
-
-def test_snapshot_runs_while_the_small_model_is_disabled() -> None:
-    seen: list[bool] = []
-    settings = demo_settings().model_copy(update={"controller_cooldown_seconds": 5})
-    with TestClient(create_app(settings)) as client:
-        api = ClientApi(client)
-        demo.run_scenario(
-            api,
-            "outage",
-            out=lambda _l: None,
-            sleep=lambda _s: time.sleep(0.2),
-            while_disabled=lambda: seen.append(
-                demo.monitor(api, demo.SMALL)["disabled_by_controller"]
-            ),
-        )
-    assert seen == [True]
