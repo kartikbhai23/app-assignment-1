@@ -29,6 +29,9 @@ Outcome = Literal["ok", "format_failure", "call_error"]
 WINDOW_EVENTS = ("disabled", "re-enabled", "operator_enabled")
 OUTCOMES: tuple[Outcome, ...] = ("ok", "format_failure", "call_error")
 DisabledFor = Literal["failure", "semantic"]
+# Every semantic disable reason starts with this (see Gateway._semantic_reason),
+# so a restart can tell a semantic disable from a failure one.
+SEMANTIC_REASON = "intent differs from Jev's"
 
 
 class Controller:
@@ -234,16 +237,21 @@ class Controller:
         interventions: Sequence[Intervention],
         samples: Sequence[MonitorSample],
         now: datetime,
-    ) -> None:
+    ) -> dict[BackendName, datetime | None]:
         """Rebuild the windows, cooldowns and operator holds after a restart.
 
         A cooldown still running when the gateway stopped resumes for the time
         left, unless an operator ended it. A re-enable, by the controller or an
         operator, clears a model's window, so only samples after the last one
         go back in, or after a disable whose cooldown has since ended. A model
-        whose last operator action was a disable is held again.
-        `interventions` and `samples` are oldest first.
+        whose last operator action was a disable is held again. A resumed
+        cooldown keeps its reason, failure or semantic, so a semantic disable
+        is still a last resort.
+        `interventions` and `samples` are oldest first. Returns each model's
+        cutoff: its window starts after that time, or from the oldest sample
+        for None.
         """
+        cutoffs: dict[BackendName, datetime | None] = {}
         for name, window in self.windows.items():
             events = [
                 i
@@ -256,6 +264,11 @@ class Controller:
                 left = self.cooldown - (now - last.at).total_seconds()
                 if last.action == "disabled" and left > 0:
                     self.disabled_until[name] = self.clock() + left
+                    self.disabled_for[name] = (
+                        "semantic"
+                        if last.reason.startswith(SEMANTIC_REASON)
+                        else "failure"
+                    )
                     enabled = [e for e in events if e.action != "disabled"]
                     cutoff = enabled[-1].at if enabled else None
                 else:
@@ -277,6 +290,8 @@ class Controller:
             ]
             window.clear()
             window.extend(o for o in outcomes if o in OUTCOMES)
+            cutoffs[name] = cutoff
+        return cutoffs
 
     def rules(self) -> ControllerRules:
         return ControllerRules(

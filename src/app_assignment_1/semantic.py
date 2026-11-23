@@ -27,7 +27,7 @@ margin and coverage minimum are placeholders until they are set from dev data.
 """
 
 from collections import Counter, deque
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -104,10 +104,18 @@ class SemanticMonitor:
             )
         )
 
-    def restore(self, samples: Sequence[MonitorSample]) -> None:
+    def restore(
+        self,
+        samples: Sequence[MonitorSample],
+        cutoffs: Mapping[BackendName, datetime | None] | None = None,
+    ) -> None:
         """Rebuild both windows after a restart from saved samples, oldest
-        first. Each window keeps only its newest samples."""
+        first. Each window keeps only its newest samples. With semantic
+        actions on, a re-enable resets a model's own window (`reset`), so
+        `cutoffs` gives the controller's cutoff for each model: only own
+        samples after it come back."""
         for name in self.windows:
+            cutoff = (cutoffs or {}).get(name)
             for traffic, windows in (
                 ("own", self.windows),
                 ("rerouted", self.rerouted),
@@ -121,6 +129,7 @@ class SemanticMonitor:
                     and s.monitor == "semantic"
                     and s.traffic == traffic
                     and s.outcome in SAMPLES
+                    and (traffic == "rerouted" or cutoff is None or s.at > cutoff)
                 )
 
     def reset(self, name: BackendName) -> None:

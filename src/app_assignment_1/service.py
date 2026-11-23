@@ -18,7 +18,7 @@ from app_assignment_1.config import Settings
 from app_assignment_1.intents import load_intents
 from app_assignment_1.labels import UNKNOWN, load_labels
 from app_assignment_1.metrics import GatewayMetrics
-from app_assignment_1.monitor import Controller
+from app_assignment_1.monitor import SEMANTIC_REASON, Controller
 from app_assignment_1.records import JevAssessment, check_call
 from app_assignment_1.router import JevAnswer, JevResult, Router, RuleRouter
 from app_assignment_1.schemas import (
@@ -218,7 +218,7 @@ class Gateway:
             return None
         scored = status.agreements + status.disagreements
         return (
-            f"intent differs from Jev's on {status.disagreement_rate:.0%} of last "
+            f"{SEMANTIC_REASON} on {status.disagreement_rate:.0%} of last "
             f"{scored} scored replies (baseline {baseline:.0%})"
         )
 
@@ -306,8 +306,10 @@ class Gateway:
         except Exception as exc:
             logger.warning("Could not restore monitor state (%s)", type(exc).__name__)
             return
-        self.controller.restore(interventions, samples, datetime.now(UTC))
-        self.semantic.restore(samples)
+        cutoffs = self.controller.restore(interventions, samples, datetime.now(UTC))
+        # With actions off, a re-enable never resets the semantic window.
+        actions = self.semantic.rules.actions_enabled
+        self.semantic.restore(samples, cutoffs if actions else None)
         if samples or self.controller.disabled_until or self.controller.held:
             logger.info(
                 "Restored %d monitor samples; %d model(s) still cooling down, "

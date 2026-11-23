@@ -5,6 +5,8 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from app_assignment_1.config import Settings
 from app_assignment_1.monitor import Controller
 from app_assignment_1.router import MockJevRouter
@@ -237,3 +239,83 @@ def test_a_cancelled_intervention_save_keeps_the_interventions():
 
     asyncio.run(go())
     assert g.controller.unsaved == pending
+
+
+SEMANTIC_DISABLE = (
+    "intent differs from Jev's on 100% of last 10 scored replies (baseline 0%)"
+)
+
+
+def test_a_resumed_cooldown_keeps_its_reason():
+    # A semantic disable must stay a last resort after a restart, and a
+    # failure disable must not become one.
+    c = Controller([SMALL, LARGE], Settings(_env_file=None), clock=lambda: 0.0)
+    events = [
+        Intervention(
+            at=NOW - timedelta(seconds=20),
+            backend=SMALL,
+            action="disabled",
+            reason=SEMANTIC_DISABLE,
+        ),
+        Intervention(
+            at=NOW - timedelta(seconds=10),
+            backend=LARGE,
+            action="disabled",
+            reason="call error rate 100% over last 5 calls",
+        ),
+    ]
+    c.restore(events, [], NOW)
+    assert c.disabled_for == {SMALL: "semantic", LARGE: "failure"}
+    assert c.last_resort(SMALL)
+    assert not c.last_resort(LARGE)
+
+
+def test_an_expired_cooldown_leaves_no_reason():
+    c = Controller([SMALL, LARGE], Settings(_env_file=None), clock=lambda: 0.0)
+    old = Intervention(
+        at=NOW - timedelta(minutes=5),
+        backend=SMALL,
+        action="disabled",
+        reason=SEMANTIC_DISABLE,
+    )
+    c.restore([old], [], NOW)
+    assert c.disabled_for == {}
+    assert not c.last_resort(SMALL)
+
+
+def semantic(at: datetime, outcome: str, traffic: str = "own") -> MonitorSample:
+    return MonitorSample(
+        at=at, model=SMALL, monitor="semantic", outcome=outcome, traffic=traffic
+    )
+
+
+@pytest.mark.parametrize(("actions", "own_after"), [(True, ["agree"]), (False, None)])
+def test_with_actions_on_the_semantic_window_starts_after_the_re_enable(
+    actions, own_after
+):
+    # With semantic actions on, a re-enable resets the model's own semantic
+    # window, so a restart must not bring back the disagreements before it.
+    settings = Settings(_env_file=None, semantic_actions_enabled=actions)
+    store = MemoryStore(settings.request_store_limit)
+    samples = [
+        semantic(NOW - timedelta(minutes=10), "disagree"),
+        semantic(NOW - timedelta(minutes=9), "disagree", "rerouted"),
+        semantic(NOW - timedelta(minutes=2), "agree"),
+    ]
+    events = [
+        event(NOW - timedelta(minutes=8), "disabled"),
+        event(NOW - timedelta(minutes=7), "re-enabled"),
+    ]
+
+    async def go() -> Gateway:
+        await store.save_interventions(events)
+        await store.save_monitor_samples(samples)
+        g = gateway(settings, store)
+        await g.restore()
+        return g
+
+    g = asyncio.run(go())
+    own = list(g.semantic.windows[SMALL])
+    assert own == (own_after or ["disagree", "agree"])
+    # Rerouted samples are never reset by a re-enable.
+    assert list(g.semantic.rerouted[SMALL]) == ["disagree"]
