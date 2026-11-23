@@ -4,21 +4,33 @@ from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST
 
+from app_assignment_1.auth import require_operator
 from app_assignment_1.config import Settings, get_settings
 from app_assignment_1.jev import TypeSafeJevRouter, create_jev_http_client
 from app_assignment_1.labels import load_labels
 from app_assignment_1.router import MockJevRouter, Router
 from app_assignment_1.schemas import (
+    BackendConfig,
+    BackendMonitor,
+    BackendName,
     ChatRequest,
     ChatResponse,
+    FaultRequest,
     HealthResponse,
     JevBreakerStatus,
+    OperatorRequest,
     RecentRequest,
 )
-from app_assignment_1.service import BackendUnavailable, DeadlineExceeded, Gateway
+from app_assignment_1.service import (
+    BackendUnavailable,
+    DeadlineExceeded,
+    Gateway,
+    LastUsableBackend,
+    NotAMock,
+)
 from app_assignment_1.store import Store, create_store
 
 
@@ -48,6 +60,7 @@ def create_app(
             await opened.open()
             await gateway.restore()
             app.state.gateway = gateway
+            app.state.operator_token = configured.operator_token
             try:
                 yield
             finally:
@@ -128,6 +141,54 @@ def create_app(
             semantic=gateway.semantic.stats(),
             semantic_rules=gateway.semantic.rules,
         )
+
+    # Operator routes. Caddy proxies /v1, so the token is what guards them.
+    @app.post(
+        "/v1/operator/models/{name}/disable",
+        response_model=list[BackendMonitor],
+        dependencies=[Depends(require_operator)],
+        responses={409: {"description": "It is the last usable model"}},
+    )
+    async def operator_disable(
+        name: BackendName, request: Request, payload: OperatorRequest | None = None
+    ) -> list[BackendMonitor]:
+        """Hold a model disabled until an operator enables it. No cooldown."""
+        gateway: Gateway = request.app.state.gateway
+        try:
+            gateway.operator_disable(name, (payload or OperatorRequest()).reason)
+        except LastUsableBackend:
+            raise HTTPException(409, f"{name} is the last usable model") from None
+        await gateway.save_interventions()
+        return gateway.controller.stats()
+
+    @app.post(
+        "/v1/operator/models/{name}/enable",
+        response_model=list[BackendMonitor],
+        dependencies=[Depends(require_operator)],
+    )
+    async def operator_enable(
+        name: BackendName, request: Request, payload: OperatorRequest | None = None
+    ) -> list[BackendMonitor]:
+        """Lift an operator hold or a controller cooldown, with a fresh window."""
+        gateway: Gateway = request.app.state.gateway
+        gateway.operator_enable(name, (payload or OperatorRequest()).reason)
+        await gateway.save_interventions()
+        return gateway.controller.stats()
+
+    @app.post(
+        "/v1/faults",
+        response_model=BackendConfig,
+        dependencies=[Depends(require_operator)],
+        responses={409: {"description": "The model is not a mock"}},
+    )
+    async def set_fault(payload: FaultRequest, request: Request) -> BackendConfig:
+        """Set a simulated fault on a mock model while it runs. Lost on restart;
+        the Compose overrides set faults at startup."""
+        gateway: Gateway = request.app.state.gateway
+        try:
+            return gateway.set_fault(payload)
+        except NotAMock:
+            raise HTTPException(409, f"{payload.model} is not a mock model") from None
 
     # Internal only: Caddy does not proxy /metrics, and it stays out of /v1 and
     # the OpenAPI docs. Prometheus scrapes it on the Compose network.
