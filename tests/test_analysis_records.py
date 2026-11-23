@@ -150,3 +150,58 @@ def test_export_writes_requests_and_assessments(postgres_url, tmp_path):
     route = [r for r in records if r["question"] == "route"]
     assert all(r["option_order"] == ["standard", "complex"] for r in route)
     assert {r["request_id"] for r in records} == {r["id"] for r in rows}
+
+
+def test_a_fault_set_at_runtime_changes_the_settings_version():
+    # Review of #99: /v1/faults changes the answers, so it must change the ID.
+    token = "t" * 32
+    auth = {"Authorization": f"Bearer {token}"}
+    settings = Settings(_env_file=None, operator_token=token)
+    with TestClient(create_app(settings)) as client:
+        before = client.post("/v1/chat", json={"message": MESSAGE}).json()
+        fault = {"model": "qwen3-1.7b", "fault": "label_swap"}
+        assert client.post("/v1/faults", json=fault, headers=auth).status_code == 200
+        during = client.post("/v1/chat", json={"message": MESSAGE}).json()
+        health = client.get("/v1/health").json()
+        clear = {"model": "qwen3-1.7b", "fault": "none"}
+        assert client.post("/v1/faults", json=clear, headers=auth).status_code == 200
+        after = client.post("/v1/chat", json={"message": MESSAGE}).json()
+    first = before["trace"]["settings_version"]
+    assert during["trace"]["settings_version"] != first
+    assert health["settings_version"] == during["trace"]["settings_version"]
+    # Back to the same config, back to the same ID.
+    assert after["trace"]["settings_version"] == first
+
+
+def test_the_settings_version_ignores_how_paths_are_spelled():
+    relative = Settings(_env_file=None)
+    absolute = Settings(
+        _env_file=None,
+        intents_path=relative.intents_path.resolve(),
+        labels_path=relative.labels_path.resolve(),
+        policy_cards_path=relative.policy_cards_path.resolve(),
+        backends_path=relative.backends_path.resolve(),
+    )
+    rel = Gateway(relative, MockJevRouter(relative.intents_path))
+    abs_ = Gateway(absolute, MockJevRouter(absolute.intents_path))
+    assert rel.settings_version == abs_.settings_version
+
+
+def test_a_password_in_a_url_does_not_change_the_settings_version():
+    plain = Settings(_env_file=None, jev_base_url="https://api.typesafe.ai")
+    versions = {
+        settings_version(s, CONFIG_FILES)
+        for s in (
+            plain,
+            Settings(_env_file=None, jev_base_url="https://u:one@api.typesafe.ai"),
+            Settings(_env_file=None, jev_base_url="https://u:two@api.typesafe.ai"),
+        )
+    }
+    assert len(versions) == 1
+
+
+def test_a_blank_postgres_request_limit_keeps_everything(monkeypatch):
+    monkeypatch.setenv("APP_POSTGRES_REQUEST_LIMIT", "")
+    assert Settings(_env_file=None).postgres_request_limit is None
+    monkeypatch.setenv("APP_POSTGRES_REQUEST_LIMIT", "500")
+    assert Settings(_env_file=None).postgres_request_limit == 500

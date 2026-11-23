@@ -187,15 +187,8 @@ class Gateway:
         self.semantic = SemanticMonitor(
             (b.config.name for b in self.backends), settings
         )
-        self.settings_version = settings_version(
-            settings,
-            (
-                settings.intents_path,
-                settings.labels_path,
-                settings.policy_cards_path,
-                settings.backends_path,
-            ),
-        )
+        self.settings = settings
+        self.settings_version = self._settings_version()
         if settings.semantic_actions_enabled:
             # A re-enabled model starts both windows again, or one old run of
             # disagreements would disable it on its next reply. With actions
@@ -264,6 +257,16 @@ class Gateway:
     def operator_enable(self, name: BackendName, reason: str) -> None:
         self.controller.operator_enable(name, reason)
 
+    def _settings_version(self) -> str:
+        """The models' live config stands in for backends.json, so a fault
+        set through /v1/faults gives later requests a new ID."""
+        s = self.settings
+        return settings_version(
+            s,
+            (s.intents_path, s.labels_path, s.policy_cards_path),
+            [b.config.model_dump(mode="json") for b in self.backends],
+        )
+
     def set_fault(self, request: FaultRequest) -> BackendConfig:
         """Change a mock model's simulated fault rates while it runs."""
         backend = self.backend(request.model)
@@ -278,6 +281,7 @@ class Gateway:
             config.fault_rate = request.rate
         else:
             config.label_swap_rate = request.rate
+        self.settings_version = self._settings_version()
         logger.info(
             "Operator set fault %s=%s on %s", request.fault, request.rate, request.model
         )
