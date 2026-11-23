@@ -40,7 +40,8 @@ class BackendReply(StrictModel):
 
 
 class Trace(StrictModel):
-    router: Literal["mock_jev", "rule_router"]
+    # jev: the real TypeSafe Jev answered the route question.
+    router: Literal["mock_jev", "jev", "rule_router"]
     jev_choice: Route | None
     route: Route
     model: BackendName
@@ -54,6 +55,7 @@ class Trace(StrictModel):
     format_errors: list[str] = Field(default_factory=list)
     fallback_reason: str | None = None
     controller_action: str | None = None
+    # The reply came from a mock Qwen backend; router says whether Jev was real.
     mocked: Literal[True] = True
 
 
@@ -118,6 +120,23 @@ class BackendConfig(StrictModel):
     label_swap_rate: float = Field(default=0, ge=0, le=1)
 
 
+FaultKind = Literal["none", "outage", "bad_format", "label_swap"]
+
+
+class FaultRequest(StrictModel):
+    """Set one simulated fault on one mock model. `none` clears all three."""
+
+    model: BackendName
+    fault: FaultKind
+    # Share of calls the fault hits; ignored for `none`.
+    rate: float = Field(default=1, ge=0, le=1)
+
+
+class OperatorRequest(StrictModel):
+    # Saved in the intervention log; never put customer data here.
+    reason: str = Field(default="operator request", min_length=1, max_length=200)
+
+
 class BackendMonitor(StrictModel):
     name: BackendName
     samples: int = Field(ge=0)
@@ -125,13 +144,24 @@ class BackendMonitor(StrictModel):
     call_errors: int = Field(ge=0)
     failure_rate: float | None = Field(ge=0, le=1)
     disabled_by_controller: bool
+    # Held by POST /v1/operator/models/{name}/disable until an operator enables it.
+    disabled_by_operator: bool = False
     disabled_for_seconds: float | None = Field(default=None, ge=0)
+
+
+InterventionAction = Literal[
+    "disabled",
+    "re-enabled",
+    "kept_last_backend",
+    "operator_disabled",
+    "operator_enabled",
+]
 
 
 class Intervention(StrictModel):
     at: datetime
     backend: BackendName
-    action: Literal["disabled", "re-enabled", "kept_last_backend"]
+    action: InterventionAction
     reason: str
 
 
@@ -206,8 +236,10 @@ class HealthResponse(StrictModel):
     recent_requests: list[RecentRequest] = Field(default_factory=list)
     usage: list[ModelUsage] = Field(default_factory=list)
     status: Literal["ok", "degraded"]
+    # mode is the Qwen backends; jev_mode and router are Jev.
     mode: Literal["mock"] = "mock"
-    router: Literal["mock_jev"] = "mock_jev"
+    jev_mode: Literal["mock", "real"] = "mock"
+    router: Literal["mock_jev", "jev"] = "mock_jev"
     backends: list[BackendConfig]
     monitor: list[BackendMonitor]
     interventions: list[Intervention]
