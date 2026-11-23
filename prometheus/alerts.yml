@@ -64,11 +64,14 @@ groups:
           summary: Chat requests got a 503 in the last 5 minutes
           description: No model could answer them, or the request deadline ran out.
 
+      # gateway_chat_requests_total has no series until the first reply, so
+      # "or vector(0)" keeps a full outage after a restart from giving an
+      # empty result. JevMostlySkipped below does the same.
       - alert: ChatMostlyFailing
         expr: >-
           sum(rate(gateway_chat_unavailable_total[5m]))
             / (sum(rate(gateway_chat_unavailable_total[5m]))
-               + sum(rate(gateway_chat_requests_total[5m]))) > 0.2
+               + (sum(rate(gateway_chat_requests_total[5m])) or vector(0))) > 0.2
         for: 5m
         labels:
           severity: critical
@@ -80,7 +83,7 @@ groups:
       - alert: JevMostlySkipped
         expr: >-
           sum(rate(gateway_jev_fallbacks_total[5m]))
-            / (sum(rate(gateway_chat_requests_total[5m]))
+            / ((sum(rate(gateway_chat_requests_total[5m])) or vector(0))
                + sum(rate(gateway_chat_unavailable_total[5m]))) > 0.5
         for: 5m
         labels:

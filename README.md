@@ -202,6 +202,10 @@ Labels only take values from fixed lists. Message text, replies and request IDs 
 | `JevMostlySkipped` | warning | The rule router routes more than half of messages for 5 minutes, because Jev fails or its breaker is open |
 | `ChatLatencyHigh` | warning | p95 chat latency is above 10 s for 10 minutes |
 
+**Hard failures and slow drift.** `ModelFailureRateRising` and `PossibleWrongIntents` are for problems the controller does not act on: a model failing some calls but below the 50% threshold, or wrong intents while semantic actions are off or the other model can't take over. For a hard failure, the controller disables the model within a few requests, and `ModelDisabledByController` fires. The re-enable then clears the window, which restarts the `for:` timer of the two slower alerts, so they may never fire during a hard failure. `PossibleWrongIntents` also needs `APP_SEMANTIC_BASELINE_DISAGREEMENT_RATE`: without a baseline, its gauge stays 0 at any disagreement rate.
+
+`ChatMostlyFailing` and `JevMostlySkipped` divide by the number of replies, and `gateway_chat_requests_total` has no series until the first reply. Each rule adds `or vector(0)` to that term, so a full outage right after a restart still fires.
+
 `prometheus/alerts_test.yml` tests each alert with promtool, including cases that must not fire. CI runs it, and checks that Compose's Prometheus loaded the rules. `tests/test_alert_rules.py` checks that every metric the rules use is one the gateway serves. To run the promtool tests locally:
 
 ```bash

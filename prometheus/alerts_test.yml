@@ -141,6 +141,47 @@ tests:
               summary: 50% of chat requests get a 503
               description: More than 1 in 5 requests fail for 5 minutes.
 
+  - name: a full outage right after a restart still fires the critical alert
+    interval: 15s
+    input_series:
+      # Every request gets a 503, and no reply has been sent since the
+      # gateway started, so gateway_chat_requests_total has no series at all.
+      - series: "gateway_chat_unavailable_total"
+        values: "0+2x60"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ChatMostlyFailing
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: ChatMostlyFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#chatmostlyfailing
+              summary: 100% of chat requests get a 503
+              description: More than 1 in 5 requests fail for 5 minutes.
+
+  - name: Jev skipped on every message while every request fails
+    interval: 15s
+    input_series:
+      - series: 'gateway_jev_fallbacks_total{reason="jev_timeout"}'
+        values: "0+2x60"
+      - series: "gateway_chat_unavailable_total"
+        values: "0+2x60"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: JevMostlySkipped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#jevmostlyskipped
+              summary: Keyword rules route 100% of messages
+              description: >-
+                Jev times out, errors, gives an invalid route, or its circuit
+                breaker is open. Routing still works, with the rule router.
+
   - name: keyword rules route most messages
     interval: 15s
     input_series:

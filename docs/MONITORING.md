@@ -109,6 +109,8 @@ This is the early warning. It matters most when the other model is out: the cont
 
 Check: the model's row on Health (format failures and call errors), and the gateway logs for `Backend ... failed`. Do: the same as [ModelDisabledByController](#modeldisabledbycontroller).
 
+It is meant for partial failures the controller doesn't act on. In a hard failure, the controller disables the model first, and its re-enable clears the window, which restarts this alert's 2-minute timer. So it may never fire there; [ModelDisabledByController](#modeldisabledbycontroller) covers it.
+
 It clears when the window's failure rate drops below 25%.
 
 ### PossibleWrongIntents
@@ -127,6 +129,8 @@ Do:
 - **Semantic actions on** (`compose.labelswap.yml` turns them on): the controller disables the model once the other one is answering, and [ModelDisabledByController](#modeldisabledbycontroller) fires. If it logs `kept_last_backend` instead, the other model isn't answering, so check it first.
 - **Doubtful about the rate** (low coverage, or no baseline from dev data yet): leave semantic actions off.
 - **A mock fault:** clear it with `"fault": "none"`.
+
+With semantic actions on, a model giving the wrong intent on every reply is disabled within a few replies. Its re-enable clears the window, so this alert's 5-minute timer restarts and it may not fire; [ModelDisabledByController](#modeldisabledbycontroller) covers that case.
 
 It clears when the model is back within the baseline plus margin.
 
@@ -149,7 +153,7 @@ It clears 5 minutes after the last 503.
 
 ### ChatMostlyFailing
 
-**Critical.** More than 1 in 5 chat requests get a 503, for 5 minutes. Customers are mostly not getting answers.
+**Critical.** More than 1 in 5 chat requests get a 503, for 5 minutes. Customers are mostly not getting answers. It also fires when no request has succeeded since the gateway started.
 
 Do, in order:
 1. On Health, find which models are out and why: disabled, held, or unavailable in config.
