@@ -144,9 +144,15 @@ class BackendMonitor(StrictModel):
     call_errors: int = Field(ge=0)
     failure_rate: float | None = Field(ge=0, le=1)
     disabled_by_controller: bool
+    # Why the controller disabled it: format failures and call errors, or
+    # intents that differ from Jev's (a last resort when no other model answers).
+    disabled_for: Literal["failure", "semantic"] | None = None
     # Held by POST /v1/operator/models/{name}/disable until an operator enables it.
     disabled_by_operator: bool = False
     disabled_for_seconds: float | None = Field(default=None, ge=0)
+    # Has calls in its failure window, at a rate below the threshold. A
+    # semantic disable of the other model needs this.
+    answering: bool = False
 
 
 InterventionAction = Literal[
@@ -246,6 +252,8 @@ class SemanticRules(StrictModel):
     min_coverage: float = Field(ge=0, le=1)
     baseline_disagreement_rate: float | None = Field(ge=0, le=1)
     alert_margin: float = Field(ge=0, le=1)
+    # Whether the controller disables a model that is above the baseline.
+    actions_enabled: bool
 
 
 class HealthResponse(StrictModel):
