@@ -101,6 +101,65 @@ def test_a_running_cooldown_keeps_the_window_from_before_the_disable():
     assert not c.is_disabled(SMALL)
 
 
+def test_an_operator_hold_comes_back_after_a_restart():
+    c = Controller([SMALL, LARGE], Settings(_env_file=None), clock=lambda: 0.0)
+    events = [
+        event(NOW - timedelta(hours=2), "operator_disabled"),
+        event(NOW - timedelta(hours=1), "operator_enabled"),
+        event(NOW - timedelta(minutes=30), "operator_disabled"),
+        event(NOW - timedelta(minutes=20), "operator_disabled", LARGE),
+        event(NOW - timedelta(minutes=10), "operator_enabled", LARGE),
+    ]
+    c.restore(events, [], NOW)
+    assert c.held == {SMALL}
+    assert c.is_disabled(SMALL)
+    assert not c.is_disabled(LARGE)
+    # Restoring logs nothing new.
+    assert c.unsaved == []
+
+
+def test_an_operator_enable_ends_the_cooldown_and_clears_the_window():
+    c = Controller([SMALL, LARGE], Settings(_env_file=None), clock=lambda: 0.0)
+    samples = [
+        failure(NOW - timedelta(seconds=40), "format_failure"),
+        failure(NOW - timedelta(seconds=5), "ok"),
+    ]
+    events = [
+        event(NOW - timedelta(seconds=30), "disabled"),
+        event(NOW - timedelta(seconds=20), "operator_enabled"),
+    ]
+    c.restore(events, samples, NOW)
+    assert not c.is_disabled(SMALL)
+    assert list(c.windows[SMALL]) == ["ok"]
+
+
+def test_a_disable_after_an_operator_enable_keeps_the_newer_samples():
+    clock = [100.0]
+    c = Controller([SMALL, LARGE], Settings(_env_file=None), clock=lambda: clock[0])
+    samples = [
+        failure(NOW - timedelta(minutes=5), "call_error"),
+        failure(NOW - timedelta(seconds=30), "format_failure"),
+    ]
+    events = [
+        event(NOW - timedelta(minutes=4), "operator_enabled"),
+        event(NOW - timedelta(seconds=10), "disabled"),
+    ]
+    c.restore(events, samples, NOW)
+    assert c.disabled_until[SMALL] == 150.0
+    assert list(c.windows[SMALL]) == ["format_failure"]
+
+
+def test_a_hold_survives_a_gateway_restart():
+    settings = Settings(_env_file=None)
+    store = MemoryStore(settings.request_store_limit)
+    first = gateway(settings, store)
+    first.operator_disable(SMALL, "maintenance")
+    asyncio.run(first.save_interventions())
+    second = gateway(settings, store)
+    asyncio.run(second.restore())
+    assert {m.name: m for m in second.controller.stats()}[SMALL].disabled_by_operator
+
+
 def test_each_window_keeps_only_its_newest_samples():
     settings = Settings(_env_file=None, monitor_window=3, monitor_min_samples=3)
     c = Controller([SMALL, LARGE], settings, clock=lambda: 0.0)

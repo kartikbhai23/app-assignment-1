@@ -24,6 +24,9 @@ from app_assignment_1.schemas import (
 )
 
 Outcome = Literal["ok", "format_failure", "call_error"]
+# Interventions that start or end a cooldown. Both kinds of enable clear the
+# window; an operator enable also ends a running cooldown.
+WINDOW_EVENTS = ("disabled", "re-enabled", "operator_enabled")
 OUTCOMES: tuple[Outcome, ...] = ("ok", "format_failure", "call_error")
 
 
@@ -164,18 +167,20 @@ class Controller:
         samples: Sequence[MonitorSample],
         now: datetime,
     ) -> None:
-        """Rebuild the windows and cooldowns after a restart.
+        """Rebuild the windows, cooldowns and operator holds after a restart.
 
         A cooldown still running when the gateway stopped resumes for the time
-        left. A re-enable clears a model's window, so only samples after its
-        last re-enable go back in, or after a disable whose cooldown has since
-        ended. `interventions` and `samples` are oldest first.
+        left, unless an operator ended it. A re-enable, by the controller or an
+        operator, clears a model's window, so only samples after the last one
+        go back in, or after a disable whose cooldown has since ended. A model
+        whose last operator action was a disable is held again.
+        `interventions` and `samples` are oldest first.
         """
         for name, window in self.windows.items():
             events = [
                 i
                 for i in interventions
-                if i.backend == name and i.action in ("disabled", "re-enabled")
+                if i.backend == name and i.action in WINDOW_EVENTS
             ]
             cutoff: datetime | None = None
             if events:
@@ -183,10 +188,18 @@ class Controller:
                 left = self.cooldown - (now - last.at).total_seconds()
                 if last.action == "disabled" and left > 0:
                     self.disabled_until[name] = self.clock() + left
-                    enabled = [e for e in events if e.action == "re-enabled"]
+                    enabled = [e for e in events if e.action != "disabled"]
                     cutoff = enabled[-1].at if enabled else None
                 else:
                     cutoff = last.at
+            holds = [
+                i.action
+                for i in interventions
+                if i.backend == name
+                and i.action in ("operator_disabled", "operator_enabled")
+            ]
+            if holds and holds[-1] == "operator_disabled":
+                self.held.add(name)
             outcomes = [
                 s.outcome
                 for s in samples

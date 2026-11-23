@@ -258,11 +258,13 @@ class Gateway:
             return
         self.controller.restore(interventions, samples, datetime.now(UTC))
         self.semantic.restore(samples)
-        if samples or self.controller.disabled_until:
+        if samples or self.controller.disabled_until or self.controller.held:
             logger.info(
-                "Restored %d monitor samples; %d model(s) still cooling down",
+                "Restored %d monitor samples; %d model(s) still cooling down, "
+                "%d held by an operator",
                 len(samples),
                 len(self.controller.disabled_until),
+                len(self.controller.held),
             )
 
     async def _save_interventions(self) -> None:
