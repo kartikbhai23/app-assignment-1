@@ -27,6 +27,7 @@ from app_assignment_1.schemas import (
     BackendReply,
     ChatResponse,
     FaultRequest,
+    JevUsage,
     ModelUsage,
     PolicyCard,
     RoutingDecision,
@@ -130,6 +131,11 @@ class Gateway:
         self.request_deadline = settings.request_deadline_seconds
         self.alternate_reserve = settings.alternate_reserve_seconds
         self.jev_timeout = settings.jev_timeout_seconds
+        self.jev_input_price = settings.jev_input_price_per_million_usd
+        # Answered Jev calls and their tokens since start; see jev_usage().
+        self.jev_answered_calls = 0
+        self.jev_input_tokens = 0
+        self.jev_output_tokens = 0
         self.store = store or MemoryStore(settings.request_store_limit)
         # Each store write waits at most this long, so a database outage
         # delays a reply by seconds, not by the pool's 30-second default.
@@ -174,6 +180,20 @@ class Gateway:
             (b.config.name for b in self.backends), settings
         )
         self.metrics = GatewayMetrics(self)
+
+    def jev_usage(self) -> JevUsage:
+        cost = (
+            None
+            if self.jev_input_price is None
+            else self.jev_input_tokens * self.jev_input_price / 1_000_000
+        )
+        return JevUsage(
+            mocked=self.jev_mocked,
+            answered_calls=self.jev_answered_calls,
+            input_tokens=self.jev_input_tokens,
+            output_tokens=self.jev_output_tokens,
+            estimated_cost_usd=cost,
+        )
 
     def usable(self, backend: Backend) -> bool:
         """Configured available and not disabled by the controller."""
@@ -333,6 +353,9 @@ class Gateway:
                 start=start,
             )
         self.jev_breaker.succeeded()
+        self.jev_answered_calls += 1
+        self.jev_input_tokens += result.input_tokens
+        self.jev_output_tokens += result.output_tokens
         return result, self._jev_records(
             request_id, call_id, start=start, result=result
         )

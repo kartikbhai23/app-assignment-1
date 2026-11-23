@@ -193,6 +193,19 @@ class ModelUsage(StrictModel):
     estimated_cost_usd: float | None = None
 
 
+class JevUsage(StrictModel):
+    """Jev calls that returned an answer since the gateway started, and their
+    tokens. Each call counts once, not once per question."""
+
+    mocked: bool
+    answered_calls: int = Field(ge=0)
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    # Input tokens times APP_JEV_INPUT_PRICE_PER_MILLION_USD; Jev does not
+    # charge for output tokens. None while the price is unset.
+    estimated_cost_usd: float | None = Field(default=None, ge=0)
+
+
 class JevBreakerStatus(StrictModel):
     """The Jev circuit breaker. While it is not closed, the rule router routes
     most or all messages."""
@@ -248,5 +261,6 @@ class HealthResponse(StrictModel):
     interventions: list[Intervention]
     controller: ControllerRules
     jev_breaker: JevBreakerStatus
+    jev_usage: JevUsage
     semantic: list[SemanticStatus]
     semantic_rules: SemanticRules
