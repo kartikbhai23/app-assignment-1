@@ -18,6 +18,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 from urllib.error import HTTPError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 DEFAULT_URL = "http://127.0.0.1:8080"
@@ -27,7 +28,7 @@ SMALL, LARGE = "qwen3-1.7b", "qwen3-4b"
 STANDARD = "My card has not arrived"
 COMPLEX = "My card was stolen"
 MAX_MESSAGES = 30
-SCRAPE_SECONDS = 16  # prometheus/prometheus.yml scrapes every 15 seconds
+SCRAPE_SECONDS = 15  # prometheus/prometheus.yml scrapes every 15 seconds
 
 # name: (fault sent to /v1/faults, what the presenter should say)
 SCENARIOS = {
@@ -39,10 +40,14 @@ SCENARIOS = {
     ),
 }
 
+DISABLED_QUERY = "gateway_model_disabled"
 QUERIES = [
-    "gateway_model_disabled",
-    "sum by (action, model) (gateway_controller_interventions_total)",
+    DISABLED_QUERY,
+    "gateway_monitor_failure_rate",
     "gateway_semantic_disagreement_rate",
+    # The demo's own reset adds operator_* rows; leave them out.
+    "sum by (action, model) (gateway_controller_interventions_total"
+    '{action=~"disabled|re-enabled"})',
 ]
 
 
@@ -92,10 +97,19 @@ def show(step: int, kind: str, reply: dict[str, Any], out: Callable[[str], None]
 
 
 def reset(api: Any) -> None:
-    """Clear every fault and give both models a fresh window."""
+    """Clear every fault, lift any disable, and start the small model's failure
+    and semantic windows again.
+
+    Enabling a model that is not disabled changes nothing, so the small model is
+    held and released: releasing a hold always starts its windows again. Without
+    that, replies from the previous scenario stay in its windows and the
+    controller's reason reads, say, "80% over last 5 calls" after 4 messages.
+    """
     for model in (SMALL, LARGE):
         api.call("/v1/faults", {"model": model, "fault": "none"})
         api.call(f"/v1/operator/models/{model}/enable", {"reason": "demo reset"})
+    api.call(f"/v1/operator/models/{SMALL}/disable", {"reason": "demo reset"})
+    api.call(f"/v1/operator/models/{SMALL}/enable", {"reason": "demo reset"})
 
 
 def run_scenario(
@@ -104,7 +118,11 @@ def run_scenario(
     out: Callable[[str], None] = print,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
+    while_disabled: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
+    """Run one scenario. `while_disabled`, if given, runs after the fault is
+    cleared and before the cooldown ends, with the seconds left until it ends,
+    so it can show the model while it is still disabled."""
     fault, story = SCENARIOS[name]
     out(f"\n=== {name}: {story}")
     reset(api)
@@ -125,7 +143,8 @@ def run_scenario(
             raise DemoError(f"{SMALL} was not disabled after {sent} messages")
         step, sent = step + 1, sent + 1
         show(step, "standard", send(api, STANDARD), out)
-    detected = clock() - injected
+    disabled_at = clock()
+    detected = disabled_at - injected
     state = monitor(api, SMALL)
     out(f"  {SMALL} disabled for {state['disabled_for']} after {sent} messages")
 
@@ -135,11 +154,15 @@ def run_scenario(
     if after["model"] != LARGE or after["format"] != "passed":
         raise DemoError(f"traffic did not move to {LARGE} cleanly: {after}")
 
+    # Clear the fault first, so the model is healthy if a check re-enables it
+    # while `while_disabled` runs.
     api.call("/v1/faults", {"model": SMALL, "fault": "none"})
-    cleared = clock()
-    out(f"  fault cleared; waiting for the {rules['cooldown_seconds']:g} s cooldown")
+    cooldown = rules["cooldown_seconds"]
+    out(f"  fault cleared; waiting for the {cooldown:g} s cooldown")
+    if while_disabled is not None:
+        while_disabled(cooldown - (clock() - disabled_at))
     while True:
-        if clock() - cleared > rules["cooldown_seconds"] + 30:
+        if clock() - disabled_at > cooldown + 30:
             raise DemoError(f"{SMALL} did not come back after the cooldown")
         sleep(2)
         step += 1
@@ -147,7 +170,7 @@ def run_scenario(
         show(step, "standard", reply, out)
         if reply["model"] == SMALL and reply["format"] == "passed":
             break
-    recovered = clock() - cleared
+    recovered = clock() - disabled_at
     return {
         "scenario": name,
         "messages_to_disable": sent,
@@ -156,26 +179,60 @@ def run_scenario(
     }
 
 
-def prometheus(out: Callable[[str], None] = print) -> None:
-    out(f"\nPrometheus (waiting {SCRAPE_SECONDS} s for a scrape)")
-    time.sleep(SCRAPE_SECONDS)
-    for query in QUERIES:
-        out(f"  {query}")
-        command = ["docker", "compose", "exec", "-T", "prometheus", "wget", "-qO-"]
-        url = "http://127.0.0.1:9090/api/v1/query?query=" + query.replace(" ", "%20")
-        done = subprocess.run(command + [url], capture_output=True, text=True)
-        if done.returncode:
-            out("    could not reach Prometheus: " + done.stderr.strip()[:200])
-            continue
-        for row in json.loads(done.stdout)["data"]["result"]:
-            labels = ",".join(
-                f"{k}={v}" for k, v in row["metric"].items() if k != "__name__"
-            )
-            out(f"    {{{labels}}} {row['value'][1]}")
+def query_prometheus(query: str) -> list[dict[str, Any]]:
+    """Run one instant query inside the prometheus container (no port is
+    published). Raise DemoError if Prometheus cannot be reached."""
+    command = ["docker", "compose", "exec", "-T", "prometheus", "wget", "-qO-"]
+    url = "http://127.0.0.1:9090/api/v1/query?query=" + quote(query)
+    done = subprocess.run(command + [url], capture_output=True, text=True)
+    if done.returncode:
+        raise DemoError("could not reach Prometheus: " + done.stderr.strip()[:200])
+    rows: list[dict[str, Any]] = json.loads(done.stdout)["data"]["result"]
+    return rows
+
+
+# When Prometheus last scraped the gateway, in Prometheus's own clock.
+SCRAPED_QUERY = f'timestamp(gateway_model_disabled{{model="{SMALL}"}})'
+
+
+def scraped_at(rows: list[dict[str, Any]]) -> str | None:
+    return rows[0]["value"][1] if rows else None
+
+
+def prometheus(
+    seconds_left: float,
+    out: Callable[[str], None] = print,
+    run: Callable[[str], list[dict[str, Any]]] = query_prometheus,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Show Prometheus while the small model is still disabled. The model is
+    already disabled when this runs, so the first scrape after it starts sees
+    the disable; an earlier one may still show the previous scenario."""
+    out(f"\nPrometheus, while {SMALL} is disabled (scraped every {SCRAPE_SECONDS} s)")
+    deadline = clock() + max(seconds_left - 1, 0)
+    try:
+        before = scraped_at(run(SCRAPED_QUERY))
+        while scraped_at(run(SCRAPED_QUERY)) in (before, None):
+            if clock() >= deadline:
+                out("  no new scrape before the cooldown ended; values may be old")
+                break
+            sleep(1)
+        for query in QUERIES:
+            out(f"  {query}")
+            for row in run(query):
+                labels = ",".join(
+                    f"{k}={v}" for k, v in row["metric"].items() if k != "__name__"
+                )
+                out(f"    {{{labels}}} {row['value'][1]}")
+    except DemoError as error:
+        out("  " + str(error))
+    out("")
 
 
 def summary(results: list[dict[str, Any]], out: Callable[[str], None] = print) -> None:
     out("\nMeasured in this run (one run each; not an average)")
+    out("  to recover: from the disable until the small model answers again")
     out(f"  {'scenario':<12} {'messages':>8} {'to disable':>11} {'to recover':>11}")
     for r in results:
         out(
@@ -188,16 +245,17 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("url", nargs="?", default=DEFAULT_URL)
     parser.add_argument("--scenario", choices=[*SCENARIOS, "all"], default="all")
-    parser.add_argument("--prometheus", action="store_true", help="query after each")
+    parser.add_argument(
+        "--prometheus", action="store_true", help="query while each model is disabled"
+    )
     args = parser.parse_args(argv)
     api = Api(args.url, os.environ.get("APP_OPERATOR_TOKEN", DEMO_TOKEN))
     names = list(SCENARIOS) if args.scenario == "all" else [args.scenario]
     results = []
     try:
         for name in names:
-            results.append(run_scenario(api, name))
-            if args.prometheus:
-                prometheus()
+            hook = prometheus if args.prometheus else None
+            results.append(run_scenario(api, name, while_disabled=hook))
         reset(api)
     except DemoError as error:
         print("DEMO FAILED: " + str(error), file=sys.stderr)

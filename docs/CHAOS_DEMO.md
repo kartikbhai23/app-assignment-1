@@ -18,26 +18,26 @@ python3 scripts/smoke_compose.py http://localhost:8080   # optional check
 ```bash
 python3 scripts/chaos_demo.py                  # all three scenarios; each waits out the 20 second cooldown
 python3 scripts/chaos_demo.py --scenario outage
-python3 scripts/chaos_demo.py --prometheus     # also query Prometheus after each scenario
+python3 scripts/chaos_demo.py --prometheus     # also query Prometheus while each model is disabled
 ```
 
-Scenarios: `bad_format`, `outage`, `label_swap`. Each one clears every fault and resets both models first, so you can rerun any of them in any order. The script exits with a non-zero status and `DEMO FAILED` if the stack does not behave as described below.
+Scenarios: `bad_format`, `outage`, `label_swap`. Each one clears every fault, lifts any disable and starts the small model's failure and semantic windows again first, so you can rerun any of them in any order and the counts in the controller's reason are that scenario's own. To start the windows again it holds and releases the small model through the operator routes, so Health shows an `operator_disabled` and an `operator_enabled` entry with reason `demo reset` before each scenario. The script exits with a non-zero status and `DEMO FAILED` if the stack does not behave as described below.
 
 ## What to say, per scenario
 
 | Scenario | Fault | What you see | Monitor that catches it |
 |---|---|---|---|
 | `bad_format` | Small model corrupts every reply | Five replies fail the format check; the fifth line shows `CONTROLLER: disabled`; the next reply comes from `qwen3-4b` | Failure monitor (format failures) |
-| `outage` | Every call to the small model raises an error | Every request is still answered, by `qwen3-4b`, with `selected_backend_error`; the controller disables the small model within about five calls | Failure monitor (call errors) |
-| `label_swap` | Small model answers well-formed replies for the wrong intent | Every format check passes, so the failure monitor sees nothing; after about ten replies the semantic monitor sees the intents disagree with Jev's, and the controller disables the model | Semantic monitor |
+| `outage` | Every call to the small model raises an error | Every request is still answered, by `qwen3-4b`, with `selected_backend_error`; the fifth line shows `CONTROLLER: disabled` | Failure monitor (call errors) |
+| `label_swap` | Small model answers well-formed replies for the wrong intent | Every format check passes, so the failure monitor sees nothing; after ten replies the semantic monitor sees the intents disagree with Jev's, and the controller disables the model | Semantic monitor |
 
 After the disable, the script clears the fault and keeps sending the same message every two seconds. Replies keep coming from `qwen3-4b` until the cooldown ends, then `qwen3-1.7b` answers again (the controller re-enables a model when it next checks, so it takes a request to notice).
 
-At the end the script prints the messages and seconds it measured in that run. They come from one run on mocks with a 20 second cooldown. Quote them as that, not as averages or as real-model results.
+At the end the script prints the messages and seconds it measured in that run. "To recover" runs from the disable until `qwen3-1.7b` answers again, so it is about the cooldown. They come from one run on mocks with a 20 second cooldown. Quote them as that, not as averages or as real-model results.
 
 ## Prometheus views
 
-Prometheus publishes no port, by design. `--prometheus` waits one 15 second scrape and then prints these queries through `docker compose exec`. You can run any of them by hand:
+Prometheus publishes no port, by design. With `--prometheus` the script clears the fault, then, while the small model is still disabled, waits for the next scrape (at most 15 seconds; an earlier scrape may still show the previous scenario) and prints these queries through `docker compose exec`: `gateway_model_disabled` reads 1, and the failure or disagreement rate is the one the controller acted on. The window still counts the failures because it only starts again when the model comes back. If no new scrape comes before the cooldown ends, the script says the values may be old and goes on. You can run any of them by hand:
 
 ```bash
 docker compose exec prometheus wget -qO- 'http://127.0.0.1:9090/api/v1/query?query=gateway_model_disabled'
@@ -48,7 +48,7 @@ docker compose exec prometheus wget -qO- 'http://127.0.0.1:9090/api/v1/query?que
 | `gateway_model_disabled` | 1 while the controller holds a model out |
 | `gateway_monitor_failure_rate` | Format and call failure rate in the window |
 | `gateway_semantic_disagreement_rate` | Share of replies whose intent differs from Jev's |
-| `sum by (action, model) (gateway_controller_interventions_total)` | Disables and re-enables so far |
+| `sum by (action, model) (gateway_controller_interventions_total{action=~"disabled\|re-enabled"})` | Disables and re-enables so far (the script leaves out the `operator_*` rows its reset adds) |
 | `sum by (model) (gateway_chat_requests_total)` | Which model answered |
 
 Metrics are scraped every 15 seconds, so they trail the live screen by up to that long. Counters reset when the gateway restarts.
