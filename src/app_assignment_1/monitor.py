@@ -17,9 +17,11 @@ from app_assignment_1.schemas import (
     BackendName,
     ControllerRules,
     Intervention,
+    InterventionAction,
 )
 
 Outcome = Literal["ok", "format_failure", "call_error"]
+DisabledFor = Literal["failure", "semantic"]
 
 
 class Controller:
@@ -47,16 +49,27 @@ class Controller:
         self.cooldown = settings.controller_cooldown_seconds
         self.clock = clock
         self.disabled_until: dict[BackendName, float] = {}
+        # Why each disabled model is out. One disabled only for wrong intents
+        # still answers as a last resort (see `last_resort`).
+        self.disabled_for: dict[BackendName, DisabledFor] = {}
+        # Disabled by an operator: no cooldown, only an operator enables it.
+        self.held: set[BackendName] = set()
         self.warned: set[BackendName] = set()
         self.log: deque[Intervention] = deque(maxlen=50)
         # Every intervention since start; the log above keeps only the latest.
         self.action_counts: Counter[tuple[str, BackendName]] = Counter()
         self.unsaved: list[Intervention] = []
+        # Called with a model's name when its cooldown ends, so other monitors
+        # can start that model's window again too.
+        self.on_reenable: list[Callable[[BackendName], None]] = []
+        # Models above the semantic baseline that could not be disabled, so
+        # kept_last_backend is logged once per run, not on every reply.
+        self.semantic_warned: set[BackendName] = set()
 
     def _note(
         self,
         name: BackendName,
-        action: Literal["disabled", "re-enabled", "kept_last_backend"],
+        action: InterventionAction,
         reason: str,
         ago: float = 0,
     ) -> None:
@@ -66,7 +79,36 @@ class Controller:
         self.unsaved.append(item)
         self.action_counts[(action, name)] += 1
 
+    def operator_disable(self, name: BackendName, reason: str) -> None:
+        """Hold a backend disabled until operator_enable. The caller checks that
+        another backend stays usable."""
+        if name in self.held:
+            return
+        self.held.add(name)
+        self._note(name, "operator_disabled", reason)
+
+    def operator_enable(self, name: BackendName, reason: str) -> None:
+        """Lift an operator hold and any controller cooldown, with a fresh window."""
+        if name not in self.held and name not in self.disabled_until:
+            return
+        self.held.discard(name)
+        self.disabled_until.pop(name, None)
+        self.disabled_for.pop(name, None)
+        self.windows[name].clear()
+        self.warned.discard(name)
+        self.semantic_warned.discard(name)
+        # Like a re-enable at the end of a cooldown: the semantic window
+        # starts again too.
+        for reset in self.on_reenable:
+            reset(name)
+        self._note(name, "operator_enabled", reason)
+
     def is_disabled(self, name: BackendName) -> bool:
+        # Check the cooldown first, so one that ended under a hold still logs.
+        cooling = self._cooling_down(name)
+        return cooling or name in self.held
+
+    def _cooling_down(self, name: BackendName) -> bool:
         until = self.disabled_until.get(name)
         if until is None:
             return False
@@ -75,7 +117,10 @@ class Controller:
             return True
         # Re-enabling happens on the next check; log when the cooldown ended.
         del self.disabled_until[name]
+        self.disabled_for.pop(name, None)
         self.windows[name].clear()
+        for reset in self.on_reenable:
+            reset(name)
         self._note(name, "re-enabled", "cooldown elapsed; window reset", now - until)
         return False
 
@@ -109,14 +154,63 @@ class Controller:
             else "failure"
         )
         reason = f"{kind} rate {rate:.0%} over last {len(window)} calls"
+        return self._disable(name, reason, can_disable, self.warned, "failure")
+
+    def _failing(self, name: BackendName) -> bool:
+        window = self.windows[name]
+        failures = sum(item != "ok" for item in window)
+        return bool(window) and failures / len(window) >= self.threshold
+
+    def answering(self, name: BackendName) -> bool:
+        """The model has calls in its window and its failure rate is below the
+        threshold. An empty window, as after a re-enable, is not evidence."""
+        return bool(self.windows[name]) and not self._failing(name)
+
+    def last_resort(self, name: BackendName) -> bool:
+        """The model is disabled only because its intents differ from Jev's.
+        The gateway still calls it when no other model answers: a reply with a
+        possibly wrong intent is better than a 503. Its own failure rate does
+        not matter, as for an enabled model that is the last one left: a model
+        that answers some calls beats a certain 503, and excluding it would
+        freeze its window until the cooldown ends. A model an operator holds
+        is never a last resort."""
+        return (
+            name not in self.held
+            and self.is_disabled(name)
+            and self.disabled_for.get(name) == "semantic"
+        )
+
+    def record_semantic(
+        self, name: BackendName, reason: str | None, can_disable: bool
+    ) -> str | None:
+        """Act on the semantic monitor: `reason` is set while the model is
+        above the baseline, None otherwise. Return the action taken, if any."""
+        if reason is None:
+            self.semantic_warned.discard(name)
+            return None
+        if name in self.disabled_until:
+            return None
+        return self._disable(
+            name, reason, can_disable, self.semantic_warned, "semantic"
+        )
+
+    def _disable(
+        self,
+        name: BackendName,
+        reason: str,
+        can_disable: bool,
+        warned: set[BackendName],
+        kind: DisabledFor,
+    ) -> str | None:
         if not can_disable:
             # Log once per run above the threshold, not on every failing request.
-            if name not in self.warned:
-                self.warned.add(name)
+            if name not in warned:
+                warned.add(name)
                 self._note(name, "kept_last_backend", reason)
             return None
-        self.warned.discard(name)
+        warned.discard(name)
         self.disabled_until[name] = self.clock() + self.cooldown
+        self.disabled_for[name] = kind
         self._note(name, "disabled", reason)
         return f"disabled {name}: {reason}"
 
@@ -131,7 +225,7 @@ class Controller:
     def stats(self) -> list[BackendMonitor]:
         result = []
         for name, window in self.windows.items():
-            disabled = self.is_disabled(name)
+            disabled = self._cooling_down(name)
             format_failures = window.count("format_failure")
             call_errors = window.count("call_error")
             failures = format_failures + call_errors
@@ -143,6 +237,9 @@ class Controller:
                     call_errors=call_errors,
                     failure_rate=round(failures / len(window), 2) if window else None,
                     disabled_by_controller=disabled,
+                    disabled_for=self.disabled_for.get(name) if disabled else None,
+                    answering=self.answering(name),
+                    disabled_by_operator=name in self.held,
                     disabled_for_seconds=(
                         round(self.disabled_until[name] - self.clock(), 1)
                         if disabled

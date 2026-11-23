@@ -23,8 +23,11 @@ from app_assignment_1.records import JevAssessment, check_call
 from app_assignment_1.router import JevAnswer, JevResult, Router, RuleRouter
 from app_assignment_1.schemas import (
     BackendConfig,
+    BackendName,
     BackendReply,
     ChatResponse,
+    FaultRequest,
+    JevUsage,
     ModelUsage,
     PolicyCard,
     RoutingDecision,
@@ -62,6 +65,14 @@ class BackendUnavailable(Exception):
 
 class DeadlineExceeded(BackendUnavailable):
     """The request deadline cut short the alternate backend's attempt."""
+
+
+class LastUsableBackend(Exception):
+    """An operator asked to disable the only backend still answering."""
+
+
+class NotAMock(Exception):
+    """A fault was asked for on a backend that is not a mock."""
 
 
 def _jev_error_type(exc: Exception) -> str:
@@ -128,6 +139,11 @@ class Gateway:
         self.request_deadline = settings.request_deadline_seconds
         self.alternate_reserve = settings.alternate_reserve_seconds
         self.jev_timeout = settings.jev_timeout_seconds
+        self.jev_input_price = settings.jev_input_price_per_million_usd
+        # Answered Jev calls and their tokens since start; see jev_usage().
+        self.jev_answered_calls = 0
+        self.jev_input_tokens = 0
+        self.jev_output_tokens = 0
         self.store = store or MemoryStore(settings.request_store_limit)
         # Each store write waits at most this long, so a database outage
         # delays a reply by seconds, not by the pool's 30-second default.
@@ -180,7 +196,26 @@ class Gateway:
                 settings.backends_path,
             ),
         )
+        if settings.semantic_actions_enabled:
+            # A re-enabled model starts both windows again, or one old run of
+            # disagreements would disable it on its next reply. With actions
+            # off, the semantic report keeps its window across a cooldown.
+            self.controller.on_reenable.append(self.semantic.reset)
         self.metrics = GatewayMetrics(self)
+
+    def jev_usage(self) -> JevUsage:
+        cost = (
+            None
+            if self.jev_input_price is None
+            else self.jev_input_tokens * self.jev_input_price / 1_000_000
+        )
+        return JevUsage(
+            mocked=self.jev_mocked,
+            answered_calls=self.jev_answered_calls,
+            input_tokens=self.jev_input_tokens,
+            output_tokens=self.jev_output_tokens,
+            estimated_cost_usd=cost,
+        )
 
     def usable(self, backend: Backend) -> bool:
         """Configured available and not disabled by the controller."""
@@ -188,8 +223,65 @@ class Gateway:
             backend.config.name
         )
 
+    def _semantic_reason(self, name: BackendName) -> str | None:
+        """Why the controller should act on this model, or None if it is not
+        above the baseline."""
+        status = self.semantic.status(name)
+        baseline = self.semantic.rules.baseline_disagreement_rate
+        if status.status != "above_baseline" or baseline is None:
+            return None
+        scored = status.agreements + status.disagreements
+        return (
+            f"intent differs from Jev's on {status.disagreement_rate:.0%} of last "
+            f"{scored} scored replies (baseline {baseline:.0%})"
+        )
+
     def others_usable(self, backend: Backend) -> bool:
         return any(self.usable(b) for b in self.backends if b is not backend)
+
+    def others_answering(self, backend: Backend) -> bool:
+        """For a semantic disable: another model is usable and has answered
+        recently without failing. "Usable" alone is not enough: a model that
+        fails every call stays usable until its failure window fills, and
+        disabling the only model that answers would turn wrong-but-valid
+        replies into 503s."""
+        return any(
+            self.usable(b) and self.controller.answering(b.config.name)
+            for b in self.backends
+            if b is not backend
+        )
+
+    def backend(self, name: BackendName) -> Backend:
+        return next(b for b in self.backends if b.config.name == name)
+
+    def operator_disable(self, name: BackendName, reason: str) -> None:
+        """Hold a model disabled until operator_enable. Like the controller, it
+        never disables the last usable model."""
+        if not self.others_usable(self.backend(name)):
+            raise LastUsableBackend(name)
+        self.controller.operator_disable(name, reason)
+
+    def operator_enable(self, name: BackendName, reason: str) -> None:
+        self.controller.operator_enable(name, reason)
+
+    def set_fault(self, request: FaultRequest) -> BackendConfig:
+        """Change a mock model's simulated fault rates while it runs."""
+        backend = self.backend(request.model)
+        if not isinstance(backend, MockBackend):
+            raise NotAMock(request.model)
+        config = backend.config
+        if request.fault == "none":
+            config.error_rate = config.fault_rate = config.label_swap_rate = 0
+        elif request.fault == "outage":
+            config.error_rate = request.rate
+        elif request.fault == "bad_format":
+            config.fault_rate = request.rate
+        else:
+            config.label_swap_rate = request.rate
+        logger.info(
+            "Operator set fault %s=%s on %s", request.fault, request.rate, request.model
+        )
+        return config
 
     async def save_interventions(self) -> None:
         """Move the controller's new interventions to the store, in order."""
@@ -308,6 +400,9 @@ class Gateway:
                 start=start,
             )
         self.jev_breaker.succeeded()
+        self.jev_answered_calls += 1
+        self.jev_input_tokens += result.input_tokens
+        self.jev_output_tokens += result.output_tokens
         return result, self._jev_records(
             request_id, call_id, start=start, result=result
         )
@@ -370,12 +465,65 @@ class Gateway:
             return []
         return records
 
+    def _fallback_left(self, order: Sequence[Backend], current: Backend) -> bool:
+        """Another model could still answer after `current`: usable now, or a
+        last resort."""
+        return any(
+            b is not current
+            and b.config.available
+            and (self.usable(b) or self.controller.last_resort(b.config.name))
+            for b in order
+        )
+
+    async def _attempt(
+        self,
+        backend: Backend,
+        message: str,
+        budget: float,
+        attempt: int,
+        action: str | None,
+    ) -> tuple[BackendReply | None, str | None, bool]:
+        """Call one backend within `budget` seconds. Return its reply (None if
+        the call failed), the latest controller action, and whether the
+        deadline cut short a later attempt."""
+        usage = self.usage[backend.config.name]
+        usage.attempted_calls += 1
+        timer = asyncio.timeout(budget)
+        try:
+            async with timer:
+                generated = BackendReply.model_validate(await backend.generate(message))
+        except Exception as exc:
+            if timer.expired() and attempt > 1:
+                # A later attempt had a shortened opportunity. Do not score this
+                # as a model failure or a successful monitor sample.
+                usage.deadline_exceeded_calls += 1
+                return None, action, True
+            usage.failed_calls += 1
+            # A reply that fails BackendReply validation also counts as a call
+            # error. Cancellation still propagates. Do not log input text or
+            # provider exception messages.
+            logger.warning(
+                "Backend %s failed (%s)", backend.config.name, type(exc).__name__
+            )
+            return (
+                None,
+                self.controller.record_error(
+                    backend.config.name, can_disable=self.others_usable(backend)
+                )
+                or action,
+                False,
+            )
+        usage.completed_calls += 1
+        return generated, action, False
+
     async def _chat(self, message: str) -> tuple[ChatResponse, list[JevAssessment]]:
         # Created before any provider call, so later records can share it.
         request_id = uuid4()
         start = perf_counter()
         reasons: list[str] = []
-        router_name: Literal["mock_jev", "rule_router"] = "mock_jev"
+        router_name: Literal["mock_jev", "jev", "rule_router"] = (
+            "mock_jev" if self.jev_mocked else "jev"
+        )
         decision: RoutingDecision | None = None
         result, jev = await self._call_jev(request_id, message, reasons)
         if result is not None:
@@ -402,72 +550,74 @@ class Gateway:
         else:
             jev_choice = decision.route
         selected = next(b for b in self.backends if b.config.route == decision.route)
-        action = None
-        attempted = 0
-        deadline_exceeded = False
         order = (selected, *(b for b in self.backends if b is not selected))
-        for position, backend in enumerate(order):
-            if not self.usable(backend):
-                if backend is selected:
-                    reasons.append(
-                        "selected_backend_disabled"
-                        if backend.config.available
-                        else "selected_backend_unavailable"
-                    )
-                continue
-            remaining = self.request_deadline - (perf_counter() - start)
-            if remaining <= 0:
-                deadline_exceeded = True
-                break
-            # Hold back the reserve only when another model can still answer.
-            # Otherwise this is the last chance, so it gets all the time left.
-            fallback_left = any(self.usable(b) for b in order[position + 1 :])
-            budget = (
-                remaining - self.alternate_reserve
-                if attempted == 0 and fallback_left
-                else remaining
-            )
-            if budget <= 0:
-                deadline_exceeded = True
-                break
-            usage = self.usage[backend.config.name]
-            usage.attempted_calls += 1
-            attempted += 1
-            timer = asyncio.timeout(budget)
-            try:
-                async with timer:
-                    generated = BackendReply.model_validate(
-                        await backend.generate(message)
-                    )
-                usage.completed_calls += 1
-                break
-            except Exception as exc:
-                if timer.expired() and attempted > 1:
-                    # The alternate had a shortened opportunity. Do not score
-                    # this as a model failure or a successful monitor sample.
-                    usage.deadline_exceeded_calls += 1
+        action = None
+        generated: BackendReply | None = None
+        tried: list[Backend] = []
+        deadline_exceeded = False
+        # Two passes. First, the models that are usable now. If none answered,
+        # every model not called yet:
+        # - one whose cooldown ended while another model's call ran is usable
+        #   again;
+        # - one disabled only for wrong intents still gives a well-formed
+        #   reply, which beats a 503. The other model can start failing after
+        #   the semantic disable, and the controller cannot see that coming.
+        for last_pass in (False, True):
+            for backend in order:
+                if backend in tried:
+                    continue
+                if not last_pass:
+                    if not self.usable(backend):
+                        if backend is selected:
+                            reasons.append(
+                                "selected_backend_disabled"
+                                if backend.config.available
+                                else "selected_backend_unavailable"
+                            )
+                        continue
+                else:
+                    if not backend.config.available:
+                        continue
+                    if not self.usable(backend):
+                        if not self.controller.last_resort(backend.config.name):
+                            continue
+                        reasons.append("semantic_last_resort")
+                remaining = self.request_deadline - (perf_counter() - start)
+                if remaining <= 0:
                     deadline_exceeded = True
                     break
-                usage.failed_calls += 1
-                # A reply that fails BackendReply validation also counts as a call
-                # error. Cancellation still propagates. Do not log input text or
-                # provider exception messages.
-                logger.warning(
-                    "Backend %s failed (%s)", backend.config.name, type(exc).__name__
+                # Hold back the reserve only on the first attempt, and only when
+                # another model, a last resort included, could still answer.
+                # Otherwise this is the last chance, so it gets all the time left.
+                budget = (
+                    remaining - self.alternate_reserve
+                    if not tried and self._fallback_left(order, backend)
+                    else remaining
                 )
-                action = self.controller.record_error(
-                    backend.config.name, can_disable=self.others_usable(backend)
+                if budget <= 0:
+                    deadline_exceeded = True
+                    break
+                tried.append(backend)
+                generated, action, cut_short = await self._attempt(
+                    backend, message, budget, len(tried), action
                 )
-                if backend is selected:
+                if generated is not None:
+                    break
+                if cut_short:
+                    deadline_exceeded = True
+                    break
+                if backend is selected and not last_pass:
                     reasons.append("selected_backend_error")
-        else:
-            self.metrics.chat_unavailable.inc()
-            self.metrics.chat_latency.observe(perf_counter() - start)
-            raise BackendUnavailable
+            if generated is not None or deadline_exceeded:
+                break
         if deadline_exceeded:
             self.metrics.chat_unavailable.inc()
             self.metrics.chat_latency.observe(perf_counter() - start)
             raise DeadlineExceeded
+        if generated is None:
+            self.metrics.chat_unavailable.inc()
+            self.metrics.chat_latency.observe(perf_counter() - start)
+            raise BackendUnavailable
         intent, reply, facts = generated.intent, generated.reply, generated.policy_facts
         uncarded = (
             intent in self.labels.names
@@ -503,12 +653,32 @@ class Gateway:
         if not format_errors:
             # Score the model's own label against Jev's intent answer. A failed
             # format check gives no semantic sample; the controller counted it.
-            sample = score(generated.intent, jev)
-            rerouted = backend is not selected
-            self.semantic.record(backend.config.name, sample, rerouted)
-            self.metrics.semantic_samples.labels(
-                backend.config.name, sample, "rerouted" if rerouted else "own"
-            ).inc()
+            # Only like with like: a mock model against mock Jev, or a real
+            # model against real Jev. A mix disagrees by design, so it is never
+            # scored and never acted on.
+            if self.jev_mocked == getattr(backend, "mocked", True):
+                sample = score(generated.intent, jev)
+                rerouted = backend is not selected
+                self.semantic.record(backend.config.name, sample, rerouted)
+                self.metrics.semantic_samples.labels(
+                    backend.config.name, sample, "rerouted" if rerouted else "own"
+                ).inc()
+                # Only replies on the model's own route can trigger an action. A
+                # rerouted reply can follow a one-off error from the selected
+                # model, which is still usable, so it must not disable the model
+                # that served it.
+                if self.semantic.rules.actions_enabled and not rerouted:
+                    action = (
+                        self.controller.record_semantic(
+                            backend.config.name,
+                            self._semantic_reason(backend.config.name),
+                            can_disable=self.others_answering(backend),
+                        )
+                        or action
+                    )
+            else:
+                self.semantic.skip(backend.config.name)
+                self.metrics.semantic_not_compared.labels(backend.config.name).inc()
 
         response = ChatResponse(
             id=request_id,

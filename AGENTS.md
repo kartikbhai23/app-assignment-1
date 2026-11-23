@@ -8,12 +8,13 @@ Smart AI Gateway (DSAN 6700 final project): a FastAPI gateway that routes bankin
 
 ## Layout
 
-- `src/app_assignment_1/api.py`: FastAPI app, the `/v1/chat`, `/v1/requests/{id}` and `/v1/health` routes, and the internal `/metrics` route.
+- `src/app_assignment_1/api.py`: FastAPI app, the `/v1/chat`, `/v1/requests/{id}` and `/v1/health` routes, the operator routes (`/v1/operator/models/{name}/disable` and `/enable`, `/v1/faults`, behind `APP_OPERATOR_TOKEN`), and the internal `/metrics` route.
+- `src/app_assignment_1/auth.py`: `require_operator`, the operator token check every operator route uses (403 while `APP_OPERATOR_TOKEN` is unset, 401 for a missing or wrong token).
 - `src/app_assignment_1/service.py`: gateway flow and reply format checks; saves requests and interventions to the store.
 - `src/app_assignment_1/store.py`: `Store` interface, `MemoryStore` (default) and `PostgresStore` (psycopg 3, plain SQL), plus the migration runner.
 - `src/app_assignment_1/migrations/`: numbered SQL files applied once at startup. Add a new file for schema changes; never edit one that has run.
 - `src/app_assignment_1/router.py`: `Router` interface returning a `JevResult` (route and intent answers), `MockJevRouter`, and the fallback `RuleRouter`.
-- `src/app_assignment_1/jev.py`: the real Jev client (`TypeSafeJevRouter`), one TypeSafe call with the route and intent questions; not wired into the app until real mode is allowed.
+- `src/app_assignment_1/jev.py`: the real Jev client (`TypeSafeJevRouter`), one TypeSafe call with the route and intent questions; the app uses it when `APP_JEV_MODE=real` (default `mock`).
 - `src/app_assignment_1/breaker.py`: the Jev circuit breaker; while it is open the gateway skips Jev and uses the rule router.
 - `src/app_assignment_1/backends.py`: `Backend` interface and `MockBackend` (the mock Qwen backends).
 - `src/app_assignment_1/intents.py`: keyword matching over the configured intents, shared by the mocks.
@@ -21,7 +22,7 @@ Smart AI Gateway (DSAN 6700 final project): a FastAPI gateway that routes bankin
 - `src/app_assignment_1/monitor.py`: in-memory failure monitor (format failures and failed calls) and `Controller`; new interventions wait in `unsaved` until the gateway stores them.
 - `src/app_assignment_1/probe.py`: offline linear probe skeleton and gate check; not used by the gateway. See `docs/PROBE.md`.
 - `src/app_assignment_1/records.py`: `JevAssessment` records for the semantic monitor and the checks on them. The gateway builds two records per request and saves them with the request through `Store`.
-- `src/app_assignment_1/semantic.py`: in-memory semantic monitor; scores each model's intent against Jev's intent answer, per model, with coverage and a baseline. Reports only.
+- `src/app_assignment_1/semantic.py`: in-memory semantic monitor; scores each model's intent against Jev's intent answer, per model, with coverage and a baseline; only when Jev and the model are both mocks or both real (`Backend.mocked`). The controller acts on it only with `APP_SEMANTIC_ACTIONS_ENABLED` (off by default).
 - `src/app_assignment_1/metrics.py`: Prometheus metrics for the gateway, served at the internal `/metrics` path (not proxied by Caddy).
 - `src/app_assignment_1/schemas.py`: Pydantic API contracts and config models.
 - `src/app_assignment_1/config.py`: cached Pydantic Settings.
@@ -35,7 +36,7 @@ Smart AI Gateway (DSAN 6700 final project): a FastAPI gateway that routes bankin
 - `scripts/jev_live_check.py`: the B6 live Jev check, run by hand with a TypeSafe key. `sample` draws messages from the Banking77 training split, `run` calls Jev once per message, and `summarize` prints the measurements. Its logs keep no message text.
 - `scripts/render_architecture.py`: draws `docs/architecture.svg` from `docs/architecture.yaml`; `--check` fails if they differ.
 - `env/`: `.env.example`, `.env.production.example` and `postgres.env.example` templates. Real `env/.env` and `env/postgres.env` are optional and ignored by git. `compose.defaults.env` holds public throwaway values (store and database password) so Compose and CI start without private files; never use it for a deployment.
-- `compose.yml`: `gateway`, `postgres` (named volume `postgres-data`), `proxy` and `prometheus` services; only `proxy` publishes a port. `compose.chaos.yml`: override that makes the small model corrupt every reply. `compose.outage.yml`: override that makes every call to the small model raise an error. `compose.labelswap.yml`: override that makes the small model answer with the wrong intent, for the semantic monitor.
+- `compose.yml`: `gateway`, `postgres` (named volume `postgres-data`), `proxy` and `prometheus` services; only `proxy` publishes a port. `compose.chaos.yml`: override that makes the small model corrupt every reply. `compose.outage.yml`: override that makes every call to the small model raise an error. `compose.labelswap.yml`: override that makes the small model answer with the wrong intent and turns semantic actions on, so the controller disables it.
 - `Caddyfile`: serves the React app on port 8080 and proxies `/v1`, `/docs`, `/redoc` and `/openapi.json` to the gateway. Never add `/metrics`.
 - `prometheus/prometheus.yml`: Prometheus scrape config; scrapes `gateway:8000/metrics` on the Compose network.
 - `docs/TEAM_PLAN.md`: who owns what. `USER_BRIEF.md`: guide for beta testers.
