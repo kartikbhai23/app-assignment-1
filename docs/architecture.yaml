@@ -213,10 +213,10 @@ components:
     title: Chaos scenarios (about 20)
     owner: "Pavlos · Jackson: screen"
     items:
-      - built: "Three faults by hand: outage, bad format, label swap"
+      - built: "Three faults, by override or /v1/faults: outage, bad format, label swap"
       - built: Tester walkthrough for outage and bad format
-      - todo: Scenarios on command; detection and recovery times; false interventions
-      - todo: Demo owner not assigned
+      - built: Detection and recovery times, false interventions (script, mocks)
+      - todo: The other scenarios; demo owner not assigned
 
   evaluation:
     title: Offline evaluation harness
