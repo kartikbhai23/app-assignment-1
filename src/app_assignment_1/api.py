@@ -140,6 +140,7 @@ def create_app(
             ),
             semantic=gateway.semantic.stats(),
             semantic_rules=gateway.semantic.rules,
+            jev_usage=gateway.jev_usage(),
         )
 
     # Operator routes. Caddy proxies /v1, so the token is what guards them.

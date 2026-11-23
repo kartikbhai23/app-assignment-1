@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     # monitor reports rates but never flags them.
     semantic_baseline_disagreement_rate: float | None = Field(default=None, ge=0, le=1)
     semantic_alert_margin: float = Field(default=0.15, ge=0, le=1)
+    # Off: the semantic monitor only reports. On: the controller disables a
+    # model above the baseline, with the same cooldown as for format failures,
+    # but only while the other model is serving and has answered recently
+    # without failing. A re-enable then also resets the semantic window. Keep
+    # it off until the baseline comes from dev data.
+    semantic_actions_enabled: bool = False
     # memory: process memory, lost on restart. postgres: needs database_url.
     store: Literal["memory", "postgres"] = "memory"
     database_url: SecretStr | None = None
@@ -57,8 +63,11 @@ class Settings(BaseSettings):
     jev_api_key: SecretStr | None = None
     jev_model: str = Field(default="jev-1.14.0", min_length=1)
     # USD per million input tokens; Jev does not charge for output tokens.
-    # Leave unset when unknown, and cost stays null.
-    jev_input_price_per_million_usd: float | None = Field(default=None, ge=0)
+    # Leave unset when unknown, and cost stays null. No inf or nan: 0 x inf is
+    # nan, which would break /v1/health and /metrics.
+    jev_input_price_per_million_usd: float | None = Field(
+        default=None, ge=0, allow_inf_nan=False
+    )
     jev_breaker_failures: int = Field(default=5, ge=1, le=1000)
     jev_breaker_cooldown_seconds: float = Field(default=30, gt=0, le=3600)
     # Bearer token for the operator routes (auth.py). Unset, empty or blank:
