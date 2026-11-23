@@ -1,0 +1,210 @@
+"""Live chaos demo: python scripts/chaos_demo.py [base_url] [--scenario NAME]
+[--prometheus].
+
+Start the stack first with `compose.demo.yml` (see docs/CHAOS_DEMO.md). The
+script injects each fault into the small model through POST /v1/faults, sends
+messages until the controller disables the model, clears the fault, and waits
+for the controller to bring the model back. It prints what happened and the
+times it measured in this run. It sends only the fixed example messages below
+and never prints or stores anything else.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from collections.abc import Callable
+from typing import Any
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+DEFAULT_URL = "http://127.0.0.1:8080"
+# Public throwaway value; it matches compose.demo.yml and protects nothing.
+DEMO_TOKEN = "chaos-demo-token-not-for-deployment"
+SMALL, LARGE = "qwen3-1.7b", "qwen3-4b"
+STANDARD = "My card has not arrived"
+COMPLEX = "My card was stolen"
+MAX_MESSAGES = 30
+SCRAPE_SECONDS = 16  # prometheus/prometheus.yml scrapes every 15 seconds
+
+# name: (fault sent to /v1/faults, what the presenter should say)
+SCENARIOS = {
+    "bad_format": ("bad_format", "The small model corrupts every reply."),
+    "outage": ("outage", "Every call to the small model raises an error."),
+    "label_swap": (
+        "label_swap",
+        "The small model answers well-formed replies for the wrong intent.",
+    ),
+}
+
+QUERIES = [
+    "gateway_model_disabled",
+    "sum by (action, model) (gateway_controller_interventions_total)",
+    "gateway_semantic_disagreement_rate",
+]
+
+
+class DemoError(Exception):
+    """The stack did not behave the way the demo expects."""
+
+
+class Api:
+    def __init__(self, base: str, token: str) -> None:
+        self.base, self.token = base.rstrip("/"), token
+
+    def call(self, path: str, payload: dict[str, Any] | None = None) -> Any:
+        headers = {"Content-Type": "application/json"}
+        if payload is not None and path != "/v1/chat":
+            headers["Authorization"] = "Bearer " + self.token
+        data = None if payload is None else json.dumps(payload).encode()
+        request = Request(self.base + path, data=data, headers=headers)
+        try:
+            with urlopen(request, timeout=30) as response:
+                return json.loads(response.read())
+        except HTTPError as error:
+            raise DemoError(f"{path} answered {error.code}") from None
+
+
+def monitor(api: Any, name: str) -> dict[str, Any]:
+    health = api.call("/v1/health")
+    return {m["name"]: m for m in health["monitor"]}[name]
+
+
+def send(api: Any, message: str) -> dict[str, Any]:
+    trace = api.call("/v1/chat", {"message": message})["trace"]
+    return {
+        "model": trace["model"],
+        "format": trace["format_check"],
+        "fallback": trace["fallback_reason"],
+        "action": trace["controller_action"],
+    }
+
+
+def show(step: int, kind: str, reply: dict[str, Any], out: Callable[[str], None]):
+    line = f"  {step:>2}. {kind:<8} -> {reply['model']:<10} format {reply['format']}"
+    if reply["fallback"]:
+        line += f" | {reply['fallback']}"
+    if reply["action"]:
+        line += f" | CONTROLLER: {reply['action']}"
+    out(line)
+
+
+def reset(api: Any) -> None:
+    """Clear every fault and give both models a fresh window."""
+    for model in (SMALL, LARGE):
+        api.call("/v1/faults", {"model": model, "fault": "none"})
+        api.call(f"/v1/operator/models/{model}/enable", {"reason": "demo reset"})
+
+
+def run_scenario(
+    api: Any,
+    name: str,
+    out: Callable[[str], None] = print,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> dict[str, Any]:
+    fault, story = SCENARIOS[name]
+    out(f"\n=== {name}: {story}")
+    reset(api)
+    rules = api.call("/v1/health")["controller"]
+    step = 0
+    if name == "label_swap":
+        # The controller only disables a model on its intents while the other
+        # model has answered recently, so the large model answers once first.
+        step += 1
+        show(step, "complex", send(api, COMPLEX), out)
+
+    api.call("/v1/faults", {"model": SMALL, "fault": fault, "rate": 1})
+    injected = clock()
+    out(f"  fault '{fault}' injected on {SMALL}")
+    sent = 0
+    while not monitor(api, SMALL)["disabled_by_controller"]:
+        if sent >= MAX_MESSAGES:
+            raise DemoError(f"{SMALL} was not disabled after {sent} messages")
+        step, sent = step + 1, sent + 1
+        show(step, "standard", send(api, STANDARD), out)
+    detected = clock() - injected
+    state = monitor(api, SMALL)
+    out(f"  {SMALL} disabled for {state['disabled_for']} after {sent} messages")
+
+    step += 1
+    after = send(api, STANDARD)
+    show(step, "standard", after, out)
+    if after["model"] != LARGE or after["format"] != "passed":
+        raise DemoError(f"traffic did not move to {LARGE} cleanly: {after}")
+
+    api.call("/v1/faults", {"model": SMALL, "fault": "none"})
+    cleared = clock()
+    out(f"  fault cleared; waiting for the {rules['cooldown_seconds']:g} s cooldown")
+    while True:
+        if clock() - cleared > rules["cooldown_seconds"] + 30:
+            raise DemoError(f"{SMALL} did not come back after the cooldown")
+        sleep(2)
+        step += 1
+        reply = send(api, STANDARD)
+        show(step, "standard", reply, out)
+        if reply["model"] == SMALL and reply["format"] == "passed":
+            break
+    recovered = clock() - cleared
+    return {
+        "scenario": name,
+        "messages_to_disable": sent,
+        "seconds_to_disable": detected,
+        "seconds_to_recover": recovered,
+    }
+
+
+def prometheus(out: Callable[[str], None] = print) -> None:
+    out(f"\nPrometheus (waiting {SCRAPE_SECONDS} s for a scrape)")
+    time.sleep(SCRAPE_SECONDS)
+    for query in QUERIES:
+        out(f"  {query}")
+        command = ["docker", "compose", "exec", "-T", "prometheus", "wget", "-qO-"]
+        url = "http://127.0.0.1:9090/api/v1/query?query=" + query.replace(" ", "%20")
+        done = subprocess.run(command + [url], capture_output=True, text=True)
+        if done.returncode:
+            out("    could not reach Prometheus: " + done.stderr.strip()[:200])
+            continue
+        for row in json.loads(done.stdout)["data"]["result"]:
+            labels = ",".join(
+                f"{k}={v}" for k, v in row["metric"].items() if k != "__name__"
+            )
+            out(f"    {{{labels}}} {row['value'][1]}")
+
+
+def summary(results: list[dict[str, Any]], out: Callable[[str], None] = print) -> None:
+    out("\nMeasured in this run (one run each; not an average)")
+    out(f"  {'scenario':<12} {'messages':>8} {'to disable':>11} {'to recover':>11}")
+    for r in results:
+        out(
+            f"  {r['scenario']:<12} {r['messages_to_disable']:>8} "
+            f"{r['seconds_to_disable']:>9.1f} s {r['seconds_to_recover']:>9.1f} s"
+        )
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("url", nargs="?", default=DEFAULT_URL)
+    parser.add_argument("--scenario", choices=[*SCENARIOS, "all"], default="all")
+    parser.add_argument("--prometheus", action="store_true", help="query after each")
+    args = parser.parse_args(argv)
+    api = Api(args.url, os.environ.get("APP_OPERATOR_TOKEN", DEMO_TOKEN))
+    names = list(SCENARIOS) if args.scenario == "all" else [args.scenario]
+    results = []
+    try:
+        for name in names:
+            results.append(run_scenario(api, name))
+            if args.prometheus:
+                prometheus()
+        reset(api)
+    except DemoError as error:
+        print("DEMO FAILED: " + str(error), file=sys.stderr)
+        return 1
+    summary(results)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
