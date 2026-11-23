@@ -33,14 +33,14 @@ class ClientApi:
         return response.json()
 
 
-def demo_settings() -> Settings:
+def demo_settings(cooldown: float = 0.5) -> Settings:
     # Mirrors compose.demo.yml, with a short cooldown so the test is quick.
     return Settings(
         _env_file=None,
         operator_token=demo.DEMO_TOKEN,
         semantic_baseline_disagreement_rate=0,
         semantic_actions_enabled=True,
-        controller_cooldown_seconds=0.5,
+        controller_cooldown_seconds=cooldown,
     )
 
 
@@ -57,6 +57,94 @@ def test_each_scenario_disables_and_recovers(name: str) -> None:
         assert "CONTROLLER: " in text
         # The demo's own messages are the only text it sends.
         assert demo.STANDARD not in text and demo.COMPLEX not in text
+
+
+# The controller needs 5 failures (monitor_min_samples) and the semantic
+# monitor 10 scored replies (semantic_min_samples), all failing, from an empty
+# window.
+EXPECTED_MESSAGES = {"bad_format": 5, "outage": 5, "label_swap": 10}
+
+
+def test_each_scenario_starts_from_empty_windows() -> None:
+    """Run back to back, as the demo does: replies left over from one scenario
+    must not count in the next one's window."""
+    with TestClient(create_app(demo_settings())) as client:
+        api, lines = ClientApi(client), []
+        for name in [*demo.SCENARIOS, *demo.SCENARIOS]:
+            result = demo.run_scenario(
+                api, name, out=lines.append, sleep=lambda _s: time.sleep(0.2)
+            )
+            assert result["messages_to_disable"] == EXPECTED_MESSAGES[name], name
+        text = "\n".join(lines)
+        assert "100% over last 5 calls" in text
+        assert "on 100% of last 10 scored replies" in text
+        assert "80%" not in text and "90%" not in text
+
+
+def test_while_disabled_runs_before_the_model_is_back() -> None:
+    with TestClient(create_app(demo_settings(cooldown=3))) as client:
+        api, seen = ClientApi(client), []
+
+        def check(seconds_left: float) -> None:
+            seen.append(seconds_left)
+            assert demo.monitor(api, demo.SMALL)["disabled_by_controller"]
+
+        result = demo.run_scenario(
+            api,
+            "outage",
+            out=lambda _line: None,
+            sleep=lambda _s: time.sleep(0.2),
+            while_disabled=check,
+        )
+        assert len(seen) == 1 and 0 < seen[0] <= 3
+        # The script reads its clock just after the controller disables.
+        assert result["seconds_to_recover"] >= 2.5
+
+
+def row(model: str, value: str) -> dict[str, Any]:
+    return {"metric": {"model": model}, "value": [0, value]}
+
+
+def test_prometheus_waits_for_a_new_scrape() -> None:
+    """A scrape from before the disable may show the previous scenario, so the
+    queries wait for one that happened after this one started."""
+    scrapes = iter(["100", "100", "100", "115"])
+    asked: list[str] = []
+
+    def run(query: str) -> list[dict[str, Any]]:
+        asked.append(query)
+        if query == demo.SCRAPED_QUERY:
+            return [row(demo.SMALL, next(scrapes))]
+        return [row(demo.SMALL, "1")]
+
+    lines: list[str] = []
+    demo.prometheus(10, out=lines.append, run=run, sleep=lambda _s: None)
+    assert asked[:4] == [demo.SCRAPED_QUERY] * 4
+    assert asked[4:] == demo.QUERIES
+    assert f"    {{model={demo.SMALL}}} 1" in lines
+    assert not any("values may be old" in line for line in lines)
+
+
+def test_prometheus_gives_up_when_the_cooldown_ends() -> None:
+    now = iter(range(100))
+    lines: list[str] = []
+    demo.prometheus(
+        3,
+        out=lines.append,
+        run=lambda _q: [row(demo.SMALL, "100")],
+        sleep=lambda _s: None,
+        clock=lambda: next(now),
+    )
+    assert "  no new scrape before the cooldown ended; values may be old" in lines
+
+
+def test_prometheus_reports_an_unreachable_server() -> None:
+    def run(_query: str) -> list[dict[str, Any]]:
+        raise demo.DemoError("could not reach Prometheus: no container")
+
+    lines: list[str] = []
+    demo.prometheus(10, out=lines.append, run=run, sleep=lambda _s: None)
+    assert "  could not reach Prometheus: no container" in lines
 
 
 def test_scenario_names_match_the_fault_kinds() -> None:
