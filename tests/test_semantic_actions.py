@@ -535,3 +535,31 @@ def test_the_reserve_is_kept_for_a_last_resort(tmp_path):
     assert reply.trace.fallback_reason == "selected_backend_error, semantic_last_resort"
     assert g.usage[LARGE].failed_calls == 1
     assert reply.trace.latency_ms < 1000
+
+
+def test_a_held_model_is_never_a_last_resort(tmp_path):
+    # The small model is disabled for its intents, then an operator holds it.
+    # When the large model fails, the held model must not answer.
+    g = gateway(make_settings(tmp_path))
+    warm_up(g)
+    send(g, 3)
+    assert g.controller.last_resort(SMALL)
+    g.operator_disable(SMALL, "maintenance")
+    assert not g.controller.last_resort(SMALL)
+    g.backends[1].config.error_rate = 1
+    with pytest.raises(BackendUnavailable):
+        send(g)
+    assert g.controller.is_disabled(SMALL)
+
+
+def test_an_operator_enable_clears_the_reason_and_the_semantic_window(tmp_path):
+    g = gateway(make_settings(tmp_path))
+    warm_up(g)
+    send(g, 3)
+    assert g.controller.disabled_for == {SMALL: "semantic"}
+    assert g.semantic.status(SMALL).samples == 3
+    g.operator_enable(SMALL, "checked")
+    assert g.controller.disabled_for == {}
+    assert g.semantic.status(SMALL).samples == 0
+    assert not g.controller.is_disabled(SMALL)
+    assert [a[1] for a in actions(g)] == ["disabled", "operator_enabled"]
