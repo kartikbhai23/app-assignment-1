@@ -282,6 +282,16 @@ describe("Semantic monitor", () => {
     expect(within(jev).queryByText(/Mock Jev reports no tokens/)).not.toBeInTheDocument();
   });
 
+  it.each([
+    [0.0000168, "$0.0000168"], // 400 input tokens at $0.042 per million
+    [0.00001, "$0.0000100"],
+    [0, "$0"],
+  ])("never shows a nonzero cost as $0.0000 (%s)", async (cost, text) => {
+    const jev_usage = { mocked: false, answered_calls: 1, input_tokens: 400, output_tokens: 7, estimated_cost_usd: cost };
+    await openHealth({ ...healthyHealth, jev_usage });
+    expect(within(screen.getByRole("region", { name: "Jev router" })).getByText(text)).toBeInTheDocument();
+  });
+
   it("shows low coverage instead of a healthy rate while Jev is down", async () => {
     const table = await openHealth(lowCoverageHealth);
 

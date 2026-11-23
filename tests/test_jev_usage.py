@@ -84,3 +84,10 @@ def test_health_and_metrics_show_usage():
     assert 'gateway_jev_tokens_total{direction="input",mocked="true"} 2000.0' in metrics
     assert 'gateway_jev_tokens_total{direction="output",mocked="true"} 7.0' in metrics
     assert 'gateway_jev_estimated_cost_usd_total{mocked="true"} 8.4e-05' in metrics
+
+
+@pytest.mark.parametrize("price", ["1e400", "inf", "nan"])
+def test_an_infinite_or_nan_price_is_rejected_at_startup(price):
+    # 0 calls x inf is nan, which JevUsage rejects, so /v1/health would fail.
+    with pytest.raises(ValueError, match="finite number"):
+        Settings(_env_file=None, jev_input_price_per_million_usd=price)

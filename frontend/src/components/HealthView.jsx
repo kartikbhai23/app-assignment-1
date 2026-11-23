@@ -167,8 +167,13 @@ function usageText(usage) {
 }
 
 function costText(usage) {
-  if (usage.estimated_cost_usd === null) return "price not set";
-  return "$" + usage.estimated_cost_usd.toFixed(4);
+  const cost = usage.estimated_cost_usd;
+  if (cost === null) return "price not set";
+  if (cost === 0) return "$0";
+  // Four decimals would show a cost under $0.0001 as $0.0000, so show three
+  // significant figures instead.
+  if (cost < 0.0001) return "$" + cost.toFixed(Math.ceil(-Math.log10(cost)) + 2);
+  return "$" + cost.toFixed(4);
 }
 
 function JevCard({ breaker, usage }) {
