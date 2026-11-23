@@ -154,7 +154,8 @@ components:
       - built: Pydantic Settings, private env file, thresholds; no secrets in Git or the image
       - simulated: 10 intents and 10 policy cards
       - built: One 78-label file; replies only for the 10 carded intents
-      - todo: Jev API key, operator token and backend URLs
+      - built: Jev API key and model, operator token; real mode needs the key
+      - todo: Backend URLs
       - todo: Prompt versions and rollback target; data/ splits and fresh set
 
   vllm_small:
@@ -184,8 +185,9 @@ components:
     owner: "Verness · Pavlos: key"
     items:
       - simulated: "Default: routing call is a local JSON mock"
-      - built: "TypeSafe client in the app: httpx, jev-1.14.0"
-      - todo: First live run in the app; 300-call check on Jetstream2
+      - built: "TypeSafe client, used when APP_JEV_MODE=real: httpx, jev-1.14.0"
+      - built: "B6 live check script: 300 of 300 calls answered on Jetstream2"
+      - todo: First live run in the app
 
   probe:
     title: Probe (stretch, offline)
