@@ -67,6 +67,7 @@ A model can return a well-formed reply for the wrong intent, which the format ch
   - `above_baseline`: the disagreement rate is above the baseline plus `APP_SEMANTIC_ALERT_MARGIN` (default 0.15).
   - `normal`: otherwise.
 - **Visibility:** `GET /v1/health` has `semantic` (per model: counts, `disagreement_rate`, `coverage`, `status`) and `semantic_rules`. `/metrics` has `gateway_semantic_samples_total`, `gateway_semantic_disagreement_rate`, `gateway_semantic_coverage` and `gateway_semantic_above_baseline`. The rate and coverage gauges are absent while a model has no data, so an empty window never reads as 0%.
+- **Like with like:** a reply is only compared when Jev and the model are both mocks or both real. Real Jev answers over 78 labels while the mock models know 10 intents, so a mix would disagree by design. Those replies are counted in `not_compared` in `/v1/health` and `gateway_semantic_not_compared_total`, and stay out of the windows.
 
 The semantic monitor only reports and takes no action. The **Health** screen shows it as a table, one row per model, and adds a red "Possible wrong intents" banner while a model is above the baseline. The defaults are placeholders: the baseline, margin and coverage minimum should be set from dev data before the final test. In mock mode, Jev and both models share one keyword classifier, so a healthy mock always agrees and its baseline is 0. A disagreement rate measured on mocks says nothing about real model quality. The windows reset when the gateway restarts.
 
@@ -77,6 +78,25 @@ docker compose -f compose.yml -f compose.labelswap.yml up -d --build --wait
 ```
 
 Send ten standard messages, such as "My card has not arrived". Each one gets a well-formed reply about a lost or stolen card. Every format check passes and the controller does nothing, but `GET /v1/health` shows `qwen3-1.7b` with a disagreement rate of 1.0 and status `above_baseline`, and the **Health** screen shows the banner. Return to normal with `docker compose up -d --wait`.
+
+### Operator routes
+
+Operators can act on the models without restarting the stack. Every operator route needs the header `Authorization: Bearer <APP_OPERATOR_TOKEN>`. While `APP_OPERATOR_TOKEN` is unset, which is the default, the routes answer 403. A missing or wrong token gets 401. Caddy proxies `/v1`, so the token is the only guard: set a long random one (at least 16 characters; leading and trailing spaces are dropped) only in `env/.env`, and never share it with testers.
+
+- `POST /v1/operator/models/{name}/disable` holds a model disabled until an operator enables it. There is no cooldown. Like the controller, it refuses to disable the last usable model (409). Traffic moves with `fallback_reason: "selected_backend_disabled"`.
+- `POST /v1/operator/models/{name}/enable` lifts an operator hold, and also ends a controller cooldown early. The model starts with an empty window.
+- Holds live in gateway memory. After a restart every held model serves again, even though the last stored intervention for it still says `operator_disabled`. Disable it again after a restart.
+- Both take an optional JSON body `{"reason": "..."}` (up to 200 characters), saved in the intervention log as `operator_disabled` or `operator_enabled`. The reason is public: `GET /v1/health` lists it without a token. Do not put customer data or anything private in it. Both return the monitor rows; `disabled_by_operator` shows a hold.
+- `POST /v1/faults` sets a simulated fault on a mock model while it runs, in place of restarting with a Compose override. The body is `{"model": "qwen3-1.7b", "fault": "outage", "rate": 1}`. `fault` is `outage` (sets `error_rate`), `bad_format` (`fault_rate`), `label_swap` (`label_swap_rate`) or `none` (clears all three). `rate` is 0–1 and defaults to 1. It returns the model's config. Faults reset when the gateway restarts.
+
+```bash
+TOKEN='your-operator-token'
+curl -fsS -X POST http://localhost:8080/v1/faults \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"model": "qwen3-1.7b", "fault": "outage"}'
+curl -fsS -X POST http://localhost:8080/v1/operator/models/qwen3-1.7b/enable \
+  -H "Authorization: Bearer $TOKEN"
+```
 
 ## Run with Docker Compose
 
@@ -216,6 +236,7 @@ Pydantic Settings reads `.env` then `env/.env` in native local runs. Process env
 | `APP_JEV_INPUT_PRICE_PER_MILLION_USD` | unset | Jev input token price for cost estimates; Jev does not charge for output tokens. Cost stays null while unset |
 | `APP_JEV_BREAKER_FAILURES` | `5` | Consecutive Jev failures before the circuit breaker skips Jev (not used yet) |
 | `APP_JEV_BREAKER_COOLDOWN_SECONDS` | `30` | How long the breaker skips Jev (not used yet) |
+| `APP_OPERATOR_TOKEN` | unset | Bearer token for the operator routes, at least 16 characters; unset turns them off (403). Set it only in `env/.env` |
 | `APP_REQUEST_DEADLINE_SECONDS` | `45` | Total time for one chat request, including the Jev call. A first attempt that runs out of time counts as a failed call; an alternate cut short gives a 503 with `deadline_exceeded` |
 | `APP_ALTERNATE_RESERVE_SECONDS` | `15` | Part of the deadline held back from the first attempt for the other backend, only when the other backend is usable; with the Jev timeout, must stay below the deadline |
 
@@ -304,7 +325,9 @@ curl -fsS "http://localhost:8080/v1/requests/$REQUEST_ID"
 | --- | --- |
 | `POST /v1/chat` | 200 validated reply; 422 invalid input; 503 no backend available or able to answer, or `deadline_exceeded` |
 | `GET /v1/requests/{id}` | 200 stored response; 404 missing, evicted, or lost in a restart with the memory store; 422 invalid UUID |
-| `GET /v1/health` | Typed Pydantic response documented in OpenAPI; 200 with backend config, monitor statistics, recent interventions, recent requests (`recent_requests`) and per-model call totals (`usage`); `degraded` when any backend is unavailable or disabled by the controller |
+| `GET /v1/health` | Typed Pydantic response documented in OpenAPI; 200 with backend config, monitor statistics, recent interventions, recent requests (`recent_requests`) and per-model call totals (`usage`); `degraded` when any backend is unavailable or disabled by the controller or an operator |
+| `POST /v1/operator/models/{name}/disable`, `/enable` | Operator token required. 200 monitor rows; 401 missing or wrong token; 409 last usable model (disable); 422 unknown model; 403 `APP_OPERATOR_TOKEN` unset |
+| `POST /v1/faults` | Operator token required. 200 the model's config; 401, 403 and 422 as above |
 | `GET /docs`, `/redoc`, `/openapi.json` | Interactive documentation and API schema |
 
 Messages must contain 1–2,000 characters and cannot be whitespace-only. Extra request fields are rejected.

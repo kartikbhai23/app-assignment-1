@@ -2,6 +2,8 @@ const ACTION_LABELS = {
   disabled: "disabled",
   "re-enabled": "re-enabled",
   kept_last_backend: "kept last backend",
+  operator_disabled: "disabled by operator",
+  operator_enabled: "enabled by operator",
 };
 
 function percent(value) {
@@ -34,7 +36,7 @@ export function describeModels(health) {
   const monitors = Object.fromEntries(health.monitor.map((m) => [m.name, m]));
   const models = health.backends.map((b) => {
     const m = monitors[b.name] ?? { samples: 0, format_failures: 0, call_errors: 0, failure_rate: null };
-    const usable = b.available && !m.disabled_by_controller;
+    const usable = b.available && !m.disabled_by_controller && !m.disabled_by_operator;
     return { ...b, ...m, usable };
   });
   return models.map((model) => {
@@ -99,7 +101,9 @@ function bannerFor(health, models) {
   }
   const up = models.find((m) => m.usable);
   const parts = down.map((m) =>
-    m.disabled_by_controller
+    m.disabled_by_operator
+      ? `${m.name} was disabled by an operator. ${m.route[0].toUpperCase() + m.route.slice(1)} requests are going to ${up.name} until an operator enables it.`
+      : m.disabled_by_controller
       ? `${m.name} was disabled by the controller. ${m.route[0].toUpperCase() + m.route.slice(1)} requests are going to ${up.name} until the cooldown ends.`
       : `${m.name} is marked unavailable in the config. Its requests are going to ${up.name}.`,
   );
@@ -153,6 +157,16 @@ function SemanticCard({ semantic, rules }) {
         A model needs {rules.min_samples} scored replies first, and at least {percent(rules.min_coverage)} of its replies need a Jev answer, so a Jev outage
         does not look like a healthy model. In mock mode, Jev and both models use the same keyword matcher, so a healthy model always agrees.
       </p>
+      {semantic.some((m) => m.not_compared) ? (
+        <p className="muted small">
+          Not compared since the gateway started:{" "}
+          {semantic
+            .filter((m) => m.not_compared)
+            .map((m) => `${m.not_compared} from ${m.name}`)
+            .join(", ")}
+          . One of Jev and the model is a mock and the other is real, so their intents differ by design and would say nothing about the model.
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -192,8 +206,11 @@ function JevCard({ breaker }) {
 
 function ModelCard({ model, threshold }) {
   const rate = model.failure_rate ?? 0;
-  const status = model.disabled_by_controller ? "Disabled" : model.available ? "Serving" : "Unavailable";
-  const extra = model.disabled_by_controller
+  const disabled = model.disabled_by_controller || model.disabled_by_operator;
+  const status = disabled ? "Disabled" : model.available ? "Serving" : "Unavailable";
+  const extra = model.disabled_by_operator
+    ? ["Re-enables", "when an operator enables it"]
+    : model.disabled_by_controller
     ? ["Re-enables in", `${Math.ceil(model.disabled_for_seconds ?? 0)} s`]
     : model.covering.length
       ? ["Also serving", `${model.covering.join(", ")} (rerouted)`]
