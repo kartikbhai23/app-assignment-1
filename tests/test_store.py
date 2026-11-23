@@ -28,9 +28,10 @@ from app_assignment_1.api import create_app
 from app_assignment_1.config import PUBLIC_DATABASE_PASSWORD, Settings
 from app_assignment_1.records import JevAssessment
 from app_assignment_1.router import MockJevRouter
-from app_assignment_1.schemas import ChatResponse, Intervention, Trace
+from app_assignment_1.schemas import ChatResponse, Intervention, ReleaseEvent, Trace
 from app_assignment_1.service import Gateway
 from app_assignment_1.store import (
+    MIGRATIONS,
     MemoryStore,
     PostgresStore,
     Store,
@@ -309,15 +310,15 @@ def test_migrations_run_once(postgres_url: str) -> None:
             second = await migrate(conn)
             cur = await conn.execute("SELECT version, name FROM schema_migrations")
             rows = await cur.fetchall()
-        assert first == [
+        # Every file in migrations/, in order, so a new migration needs no edit.
+        files = sorted(path.name for path in MIGRATIONS.glob("*.sql"))
+        assert files[:2] == [
             "001_requests_and_interventions.sql",
             "002_jev_assessments.sql",
         ]
+        assert first == files
         assert second == []
-        assert sorted(rows) == [
-            (1, "001_requests_and_interventions.sql"),
-            (2, "002_jev_assessments.sql"),
-        ]
+        assert sorted(rows) == [(int(name.split("_", 1)[0]), name) for name in files]
 
     asyncio.run(main())
 
@@ -528,3 +529,67 @@ def test_shutdown_saves_pending_interventions() -> None:
         # As if a /metrics scrape had noticed a re-enable after the last request.
         client.app.state.gateway.controller.unsaved.append(intervention(0))
     assert list(store.interventions) == [intervention(0)]
+
+
+def release_event(minute: int, backend: str, action: str, version: str) -> ReleaseEvent:
+    return ReleaseEvent(
+        at=datetime(2026, 11, 23, 12, minute, tzinfo=UTC),
+        backend=backend,  # type: ignore[arg-type]
+        action=action,  # type: ignore[arg-type]
+        version=version,
+        from_version="base" if action != "confirmed" else None,
+        rollback_target="base" if action == "deployed" else None,
+        actor="operator",
+        reason=f"step {minute}",
+    )
+
+
+def test_release_events_keep_order_and_the_latest_per_model(
+    make_store: MakeStore,
+) -> None:
+    events = [
+        release_event(0, "qwen3-1.7b", "deployed", "v2-good"),
+        release_event(1, "qwen3-4b", "deployed", "v2-good"),
+        release_event(2, "qwen3-1.7b", "rolled_back", "base"),
+    ]
+
+    async def body(store: Store) -> None:
+        assert await store.latest_release_events() == []
+        await store.save_release_events(events[:2])
+        await store.save_release_events(events[2:])
+        await store.save_release_events([])
+        assert await store.recent_release_events(10) == events
+        assert await store.recent_release_events(2) == events[1:]
+        latest = await store.latest_release_events()
+        assert sorted(latest, key=lambda e: e.backend) == [events[2], events[1]]
+
+    run(make_store(), body)
+
+
+def test_postgres_release_survives_a_restart(postgres_url: str, tmp_path) -> None:
+    catalog = tmp_path / "releases.json"
+    catalog.write_text(
+        '{"qwen3-1.7b": {"v2-bad-format": '
+        '{"description": "Bad", "changes": {"fault_rate": 1}}}}'
+    )
+    settings = Settings(
+        _env_file=None,
+        releases_path=catalog,
+        operator_token="operator-token-for-tests-only-0123456789",
+    )
+    auth = {"Authorization": "Bearer operator-token-for-tests-only-0123456789"}
+    url = "/v1/operator/models/qwen3-1.7b/release"
+
+    def app() -> TestClient:
+        store = PostgresStore(postgres_url, 100, connect_timeout=10)
+        return TestClient(
+            create_app(settings, MockJevRouter(settings.intents_path), store=store)
+        )
+
+    with app() as client:
+        assert client.post(url, json={"version": "v2-bad-format"}, headers=auth)
+    with app() as client:
+        health = client.get("/v1/health").json()
+        small = {r["name"]: r for r in health["releases"]}["qwen3-1.7b"]
+        assert (small["version"], small["status"]) == ("v2-bad-format", "watching")
+        assert [e["action"] for e in health["release_history"]] == ["deployed"]

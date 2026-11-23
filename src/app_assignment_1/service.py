@@ -20,6 +20,7 @@ from app_assignment_1.labels import UNKNOWN, load_labels
 from app_assignment_1.metrics import GatewayMetrics
 from app_assignment_1.monitor import Controller
 from app_assignment_1.records import JevAssessment, check_call
+from app_assignment_1.releases import Releases, load_catalog
 from app_assignment_1.router import JevAnswer, JevResult, Router, RuleRouter
 from app_assignment_1.schemas import (
     BackendConfig,
@@ -28,8 +29,10 @@ from app_assignment_1.schemas import (
     ChatResponse,
     FaultRequest,
     JevUsage,
+    ModelRelease,
     ModelUsage,
     PolicyCard,
+    ReleaseEvent,
     RoutingDecision,
     Trace,
 )
@@ -73,6 +76,10 @@ class LastUsableBackend(Exception):
 
 class NotAMock(Exception):
     """A fault was asked for on a backend that is not a mock."""
+
+
+class ReleaseNotSaved(Exception):
+    """An operator's release change could not be saved, so it was not made."""
 
 
 def _jev_error_type(exc: Exception) -> str:
@@ -184,7 +191,29 @@ class Gateway:
             # disagreements would disable it on its next reply. With actions
             # off, the semantic report keeps its window across a cooldown.
             self.controller.on_reenable.append(self.semantic.reset)
+        self.releases = Releases(
+            self.backends,
+            load_catalog(settings.releases_path),
+            self.controller.watch_samples,
+        )
+        self.controller.roll_back = self.releases.roll_back
+        self.controller.on_watched.append(self.releases.watched)
+        self.controller.on_confirm.append(self.releases.confirm)
+        self.releases.on_change.append(self._release_changed)
+        # One operator release change at a time.
+        self.release_lock = asyncio.Lock()
         self.metrics = GatewayMetrics(self)
+
+    def _release_changed(self, event: ReleaseEvent) -> None:
+        """A model now serves another version: its monitor windows describe
+        the old one, so both start again. A deploy starts the watch."""
+        if event.action == "confirmed":
+            return
+        if event.action == "deployed":
+            self.controller.watch(event.backend)
+        else:
+            self.controller.unwatch(event.backend)
+        self.semantic.reset(event.backend)
 
     def jev_usage(self) -> JevUsage:
         cost = (
@@ -266,8 +295,90 @@ class Gateway:
         )
         return config
 
+    async def deploy_release(
+        self, name: BackendName, version: str, reason: str
+    ) -> ModelRelease:
+        """Deploy a version to a model and start watching it. Raises
+        UnknownVersion, AlreadyServing or ReleaseNotSaved."""
+        async with self.release_lock:
+            event = self.releases.plan_deploy(name, version, reason)
+            await self._save_operator_release(event)
+        return self.releases.state[name].model_copy()
+
+    async def rollback_release(self, name: BackendName, reason: str) -> ModelRelease:
+        """Put a model back on its rollback target. Raises NoRollbackTarget or
+        ReleaseNotSaved."""
+        async with self.release_lock:
+            event = self.releases.plan_rollback(name, reason, "operator")
+            await self._save_operator_release(event)
+        return self.releases.state[name].model_copy()
+
+    async def _save_operator_release(self, event: ReleaseEvent) -> None:
+        # A cancel, such as a client disconnect, waits for the save and the
+        # apply, so a saved change is never left unapplied.
+        await self._finish(self._save_and_apply(event))
+
+    async def _save_and_apply(self, event: ReleaseEvent) -> None:
+        """Save first, then apply. A change the store does not have would be
+        undone by a restart, so a failed save changes nothing."""
+        before = self.releases.state[event.backend]
+        async with self.save_lock:
+            try:
+                await asyncio.wait_for(
+                    self.store.save_release_events([event]), self.store_timeout
+                )
+            except Exception as exc:
+                logger.warning("Could not save release change (%s)", type(exc).__name__)
+                raise ReleaseNotSaved from None
+        changed = self.releases.state[event.backend] is not before
+        self.releases.apply(event)
+        if changed:
+            # The controller rolled back or confirmed during the save, and its
+            # event will be saved after this one. Save this one again, so the
+            # newest saved event is what the model serves.
+            self.releases.unsaved.append(
+                event.model_copy(update={"at": datetime.now(UTC)})
+            )
+        logger.info(
+            "Operator %s %s: now %s",
+            event.action.replace("_", " "),
+            event.backend,
+            event.version,
+        )
+
+    async def restore_releases(self) -> None:
+        """At startup: serve the release each model had before the restart. A
+        store problem is logged and every model starts on base."""
+        try:
+            latest = await asyncio.wait_for(
+                self.store.latest_release_events(), self.store_timeout
+            )
+        except Exception as exc:
+            logger.warning("Could not load releases (%s)", type(exc).__name__)
+            return
+        self.releases.restore(latest)
+
     async def save_interventions(self) -> None:
-        """Move the controller's new interventions to the store, in order."""
+        """Move the controller's new interventions, then the release changes
+        it made, to the store, in order."""
+        await self._save_interventions()
+        if not self.releases.unsaved:
+            return
+        async with self.save_lock:
+            events, self.releases.unsaved = self.releases.unsaved, []
+            if not events:
+                return
+            try:
+                await asyncio.wait_for(
+                    self.store.save_release_events(events), self.store_timeout
+                )
+            except Exception as exc:
+                self.releases.unsaved = events + self.releases.unsaved
+                logger.warning(
+                    "Could not save release changes (%s)", type(exc).__name__
+                )
+
+    async def _save_interventions(self) -> None:
         if not self.controller.unsaved:
             return
         # One save at a time: a failed batch goes back in front of newer ones,

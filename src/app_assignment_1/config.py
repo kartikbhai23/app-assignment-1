@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     labels_path: Path = Path("config/labels.json")
     policy_cards_path: Path = Path("config/policy_cards.json")
     backends_path: Path = Path("config/backends.json")
+    # Versions an operator can deploy to each model (releases.py).
+    releases_path: Path = Path("config/releases.json")
     request_store_limit: int = Field(default=1000, ge=1, le=100000)
     jev_timeout_seconds: float = Field(default=2, gt=0, le=30)
     rule_router_complex_min_words: int = Field(default=20, ge=1, le=2000)
@@ -34,6 +36,11 @@ class Settings(BaseSettings):
     monitor_min_samples: int = Field(default=5, ge=1, le=1000)
     monitor_failure_threshold: float = Field(default=0.5, gt=0, le=1)
     controller_cooldown_seconds: float = Field(default=60, gt=0, le=3600)
+    # Calls a newly deployed release is watched for. Until then, crossing the
+    # failure threshold rolls the release back instead of disabling the model.
+    # Never fewer than monitor_min_samples, or a release would be confirmed
+    # before the controller can judge it.
+    release_watch_samples: int = Field(default=20, ge=1, le=10000)
     # Semantic monitor (semantic.py). Placeholders until set from dev data.
     semantic_window: int = Field(default=50, ge=1, le=10000)
     semantic_min_samples: int = Field(default=10, ge=1, le=10000)

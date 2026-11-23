@@ -11,6 +11,7 @@ from app_assignment_1.auth import require_operator
 from app_assignment_1.config import Settings, get_settings
 from app_assignment_1.jev import TypeSafeJevRouter, create_jev_http_client
 from app_assignment_1.labels import load_labels
+from app_assignment_1.releases import AlreadyServing, NoRollbackTarget, UnknownVersion
 from app_assignment_1.router import MockJevRouter, Router
 from app_assignment_1.schemas import (
     BackendConfig,
@@ -21,8 +22,10 @@ from app_assignment_1.schemas import (
     FaultRequest,
     HealthResponse,
     JevBreakerStatus,
+    ModelRelease,
     OperatorRequest,
     RecentRequest,
+    ReleaseRequest,
 )
 from app_assignment_1.service import (
     BackendUnavailable,
@@ -30,6 +33,7 @@ from app_assignment_1.service import (
     Gateway,
     LastUsableBackend,
     NotAMock,
+    ReleaseNotSaved,
 )
 from app_assignment_1.store import Store, create_store
 
@@ -58,6 +62,7 @@ def create_app(
                 chosen = MockJevRouter(configured.intents_path)
             gateway = Gateway(configured, chosen, store=opened)
             await opened.open()
+            await gateway.restore_releases()
             app.state.gateway = gateway
             app.state.operator_token = configured.operator_token
             try:
@@ -126,6 +131,8 @@ def create_app(
                 )
                 for r in await gateway.store.recent_requests(20)
             ],
+            releases=gateway.releases.stats(),
+            release_history=await gateway.store.recent_release_events(20),
             usage=list(gateway.usage.values()),
             backends=[b.config for b in gateway.backends],
             monitor=monitor,
@@ -174,6 +181,64 @@ def create_app(
         gateway.operator_enable(name, (payload or OperatorRequest()).reason)
         await gateway.save_interventions()
         return gateway.controller.stats()
+
+    @app.post(
+        "/v1/operator/models/{name}/release",
+        response_model=ModelRelease,
+        dependencies=[Depends(require_operator)],
+        responses={
+            404: {"description": "The model has no such version"},
+            409: {"description": "The model already serves that version"},
+            503: {"description": "The change could not be saved, so it was not made"},
+        },
+    )
+    async def deploy_release(
+        name: BackendName, payload: ReleaseRequest, request: Request
+    ) -> ModelRelease:
+        """Deploy a version to a model. The controller watches it, and rolls it
+        back if it fails before it is confirmed. Replaces any fault set with
+        /v1/faults."""
+        gateway: Gateway = request.app.state.gateway
+        try:
+            return await gateway.deploy_release(name, payload.version, payload.reason)
+        except UnknownVersion:
+            raise HTTPException(
+                404, f"{name} has no version {payload.version}"
+            ) from None
+        except AlreadyServing:
+            raise HTTPException(
+                409, f"{name} already serves {payload.version}"
+            ) from None
+        except ReleaseNotSaved:
+            raise HTTPException(
+                503, "The release change could not be saved; nothing changed"
+            ) from None
+
+    @app.post(
+        "/v1/operator/models/{name}/rollback",
+        response_model=ModelRelease,
+        dependencies=[Depends(require_operator)],
+        responses={
+            409: {"description": "The model has no version to roll back to"},
+            503: {"description": "The change could not be saved, so it was not made"},
+        },
+    )
+    async def rollback_release(
+        name: BackendName, request: Request, payload: OperatorRequest | None = None
+    ) -> ModelRelease:
+        """Put a model back on its rollback target, the last version known to
+        be good."""
+        gateway: Gateway = request.app.state.gateway
+        try:
+            return await gateway.rollback_release(
+                name, (payload or OperatorRequest()).reason
+            )
+        except NoRollbackTarget:
+            raise HTTPException(409, f"{name} has no version to roll back to") from None
+        except ReleaseNotSaved:
+            raise HTTPException(
+                503, "The release change could not be saved; nothing changed"
+            ) from None
 
     @app.post(
         "/v1/faults",
