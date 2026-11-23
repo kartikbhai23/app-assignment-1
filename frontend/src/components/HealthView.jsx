@@ -2,6 +2,8 @@ const ACTION_LABELS = {
   disabled: "disabled",
   "re-enabled": "re-enabled",
   kept_last_backend: "kept last backend",
+  operator_disabled: "disabled by operator",
+  operator_enabled: "enabled by operator",
 };
 
 function percent(value) {
@@ -34,7 +36,7 @@ export function describeModels(health) {
   const monitors = Object.fromEntries(health.monitor.map((m) => [m.name, m]));
   const models = health.backends.map((b) => {
     const m = monitors[b.name] ?? { samples: 0, format_failures: 0, call_errors: 0, failure_rate: null, answering: false };
-    const usable = b.available && !m.disabled_by_controller;
+    const usable = b.available && !m.disabled_by_controller && !m.disabled_by_operator;
     return { ...b, ...m, usable };
   });
   return models.map((model) => {
@@ -112,8 +114,10 @@ function bannerFor(health, models) {
   }
   const up = models.find((m) => m.usable);
   const parts = down.map((m) => {
+    const route = m.route[0].toUpperCase() + m.route.slice(1);
+    if (m.disabled_by_operator) return `${m.name} was disabled by an operator. ${route} requests are going to ${up.name} until an operator enables it.`;
     if (!m.disabled_by_controller) return `${m.name} is marked unavailable in the config. Its requests are going to ${up.name}.`;
-    const moved = `${m.name} was disabled by the controller. ${m.route[0].toUpperCase() + m.route.slice(1)} requests are going to ${up.name} until the cooldown ends.`;
+    const moved = `${m.name} was disabled by the controller. ${route} requests are going to ${up.name} until the cooldown ends.`;
     // Disabled only for its intents: it still answers when the other model fails.
     return m.disabled_for === "semantic" ? `${moved} If ${up.name} fails a request, the gateway still sends it to ${m.name} as a last resort.` : moved;
   });
@@ -209,8 +213,11 @@ function JevCard({ breaker }) {
 
 function ModelCard({ model, threshold }) {
   const rate = model.failure_rate ?? 0;
-  const status = model.disabled_by_controller ? "Disabled" : model.available ? "Serving" : "Unavailable";
-  const extra = model.disabled_by_controller
+  const disabled = model.disabled_by_controller || model.disabled_by_operator;
+  const status = disabled ? "Disabled" : model.available ? "Serving" : "Unavailable";
+  const extra = model.disabled_by_operator
+    ? ["Re-enables", "when an operator enables it"]
+    : model.disabled_by_controller
     ? ["Re-enables in", `${Math.ceil(model.disabled_for_seconds ?? 0)} s`]
     : model.covering.length
       ? ["Also serving", `${model.covering.join(", ")} (rerouted)`]
@@ -373,7 +380,12 @@ function HealthBody({ health }) {
 
       <section className="card">
         <h2>Usage since gateway startup</h2>
-        <p>Mock mode: token usage and estimated cost are unavailable. No model-provider inference calls are made. Infrastructure costs are not measured; these figures cannot establish routing savings.</p>
+        <p>
+          {health.jev_mode === "real"
+            ? "Jev calls go to TypeSafe, but their tokens and cost are not shown here yet. The Qwen models are mocks, so their token usage and cost are unavailable."
+            : "Mock mode: token usage and estimated cost are unavailable. No model-provider inference calls are made."}{" "}
+          Infrastructure costs are not measured; these figures cannot establish routing savings.
+        </p>
         <p className="muted small">Totals include fallback attempts and do not expire with the monitoring window. A completed call may still fail the format check. In-flight or cancelled calls can leave attempts greater than completed plus failed calls. Resets on restart.</p>
         <div className="table-scroll">
           <table className="log" aria-label="Usage since gateway startup">

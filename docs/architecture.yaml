@@ -57,7 +57,7 @@ components:
     items:
       - built: "POST /v1/chat, GET /v1/requests/{id}, GET /v1/health (recent requests, usage), /docs"
       - built: GET /metrics, internal (not via Caddy)
-      - todo: Operator routes and operator token
+      - built: Operator token; disable or enable a model
 
   router_client:
     title: Router client
@@ -66,7 +66,7 @@ components:
       - simulated: One route and intent call, 2 s timeout
       - built: Rule router on Jev timeout, error or invalid route
       - built: Circuit breaker, 5 failures, 30 s
-      - todo: Real Jev client in the app
+      - built: Real Jev with APP_JEV_MODE=real
 
   canary_splitter:
     title: Canary splitter
@@ -98,7 +98,7 @@ components:
     items:
       - built: Outage, bad format and label swap, by Compose override
       - todo: Bad prompt
-      - todo: POST /v1/faults with operator token
+      - built: POST /v1/faults with operator token
 
   jev_intent:
     title: Jev intent question
@@ -106,7 +106,7 @@ components:
     items:
       - built: Gateway saves both records
       - simulated: Intent in the routing call, 11 options
-      - todo: 78 options in the routing call
+      - built: 78 options when Jev is real
 
   semantic_monitor:
     title: Semantic monitor
@@ -183,9 +183,9 @@ components:
     title: Jev API (external)
     owner: "Verness · Pavlos: key"
     items:
-      - simulated: Routing call is a local JSON mock
-      - built: "TypeSafe client code: plain httpx, jev-1.14.0"
-      - todo: Real mode in the app; 300-call check on Jetstream2
+      - simulated: "Default: routing call is a local JSON mock"
+      - built: "TypeSafe client in the app: httpx, jev-1.14.0"
+      - todo: First live run in the app; 300-call check on Jetstream2
 
   probe:
     title: Probe (stretch, offline)
@@ -247,8 +247,8 @@ layout:
     team_app: [30, 340, 215, 110]
     proxy: [300, 190, 270, 135]
     frontend: [300, 345, 270, 285]
-    api_routes: [620, 240, 340, 175]
-    router_client: [965, 240, 340, 175]
+    api_routes: [620, 240, 340, 180]
+    router_client: [965, 240, 340, 180]
     canary_splitter: [620, 425, 340, 150]
     backend_client: [965, 425, 340, 150]
     format_validation: [620, 585, 340, 160]

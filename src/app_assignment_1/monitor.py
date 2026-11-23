@@ -17,6 +17,7 @@ from app_assignment_1.schemas import (
     BackendName,
     ControllerRules,
     Intervention,
+    InterventionAction,
 )
 
 Outcome = Literal["ok", "format_failure", "call_error"]
@@ -51,6 +52,8 @@ class Controller:
         # Why each disabled model is out. One disabled only for wrong intents
         # still answers as a last resort (see `last_resort`).
         self.disabled_for: dict[BackendName, DisabledFor] = {}
+        # Disabled by an operator: no cooldown, only an operator enables it.
+        self.held: set[BackendName] = set()
         self.warned: set[BackendName] = set()
         self.log: deque[Intervention] = deque(maxlen=50)
         # Every intervention since start; the log above keeps only the latest.
@@ -66,7 +69,7 @@ class Controller:
     def _note(
         self,
         name: BackendName,
-        action: Literal["disabled", "re-enabled", "kept_last_backend"],
+        action: InterventionAction,
         reason: str,
         ago: float = 0,
     ) -> None:
@@ -76,7 +79,36 @@ class Controller:
         self.unsaved.append(item)
         self.action_counts[(action, name)] += 1
 
+    def operator_disable(self, name: BackendName, reason: str) -> None:
+        """Hold a backend disabled until operator_enable. The caller checks that
+        another backend stays usable."""
+        if name in self.held:
+            return
+        self.held.add(name)
+        self._note(name, "operator_disabled", reason)
+
+    def operator_enable(self, name: BackendName, reason: str) -> None:
+        """Lift an operator hold and any controller cooldown, with a fresh window."""
+        if name not in self.held and name not in self.disabled_until:
+            return
+        self.held.discard(name)
+        self.disabled_until.pop(name, None)
+        self.disabled_for.pop(name, None)
+        self.windows[name].clear()
+        self.warned.discard(name)
+        self.semantic_warned.discard(name)
+        # Like a re-enable at the end of a cooldown: the semantic window
+        # starts again too.
+        for reset in self.on_reenable:
+            reset(name)
+        self._note(name, "operator_enabled", reason)
+
     def is_disabled(self, name: BackendName) -> bool:
+        # Check the cooldown first, so one that ended under a hold still logs.
+        cooling = self._cooling_down(name)
+        return cooling or name in self.held
+
+    def _cooling_down(self, name: BackendName) -> bool:
         until = self.disabled_until.get(name)
         if until is None:
             return False
@@ -140,8 +172,13 @@ class Controller:
         possibly wrong intent is better than a 503. Its own failure rate does
         not matter, as for an enabled model that is the last one left: a model
         that answers some calls beats a certain 503, and excluding it would
-        freeze its window until the cooldown ends."""
-        return self.is_disabled(name) and self.disabled_for.get(name) == "semantic"
+        freeze its window until the cooldown ends. A model an operator holds
+        is never a last resort."""
+        return (
+            name not in self.held
+            and self.is_disabled(name)
+            and self.disabled_for.get(name) == "semantic"
+        )
 
     def record_semantic(
         self, name: BackendName, reason: str | None, can_disable: bool
@@ -188,7 +225,7 @@ class Controller:
     def stats(self) -> list[BackendMonitor]:
         result = []
         for name, window in self.windows.items():
-            disabled = self.is_disabled(name)
+            disabled = self._cooling_down(name)
             format_failures = window.count("format_failure")
             call_errors = window.count("call_error")
             failures = format_failures + call_errors
@@ -202,6 +239,7 @@ class Controller:
                     disabled_by_controller=disabled,
                     disabled_for=self.disabled_for.get(name) if disabled else None,
                     answering=self.answering(name),
+                    disabled_by_operator=name in self.held,
                     disabled_for_seconds=(
                         round(self.disabled_until[name] - self.clock(), 1)
                         if disabled
