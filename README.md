@@ -13,6 +13,8 @@ A mocked banking-support gateway for DSAN 6700 Deliverable 2, with a React chat 
 3. Standard selects mock `qwen3-1.7b`. Complex selects mock `qwen3-4b`. The selected mock backend waits for its simulated delay, detects the intent by matching complete keyword phrases (longer/more matches score higher; config order breaks ties), and fills the reply template with fictional policy facts. Both mock backends share this classifier.
 4. Reply checks reject blank text, replies over 4,000 characters, unfilled `{placeholder}` tokens and intent labels outside `config/labels.json`. Pydantic validates the result. The chat shows the reply and its route; **Show details** opens the intent, policy facts and trace.
 
+**Real Jev.** With `APP_JEV_MODE=real`, the gateway sends each message to TypeSafe in place of step 2, using `TypeSafeJevRouter` in `jev.py`: one `/v1/systemone` call with the route question and the intent question over the 78 labels. Every chat message then leaves the server, so use only made-up details, and update `USER_BRIEF.md` before testers use a gateway in this mode. It needs `APP_JEV_API_KEY` and an `https` `APP_JEV_BASE_URL`. The Qwen backends stay mocks. The trace shows `router: "jev"` when real Jev chose the route, and `/v1/health` shows `jev_mode: "real"` and `router: "jev"`; `mode` and `trace.mocked` still describe the mock Qwen backends. Compose and CI run with the default, `mock`. No test calls TypeSafe; the tests use a fake TypeSafe server.
+
 If Jev fails or does not answer within `APP_JEV_TIMEOUT_SECONDS`, the rule router chooses the route instead: messages of `APP_RULE_ROUTER_COMPLEX_MIN_WORDS` words or more go to `complex`, shorter ones to `standard`. The request still goes to a backend. The trace shows `router: "rule_router"`, `jev_choice: null`, `confidence: null` and `fallback_reason` `jev_timeout` or `jev_error`. Jev's answers are checked one at a time: an invalid route answer also uses the rule router, with `fallback_reason: "jev_invalid_route"`, while an invalid intent answer still uses Jev's route.
 
 After `APP_JEV_BREAKER_FAILURES` failed Jev calls in a row (default 5), a circuit breaker skips Jev for `APP_JEV_BREAKER_COOLDOWN_SECONDS` (default 30), and the rule router routes every message with `fallback_reason: "jev_circuit_open"`. After the cool-off, one message tries Jev again: success closes the breaker, failure opens it for another cool-off. An invalid answer is not a failed call. `/v1/health` shows the breaker in `jev_breaker`. The breaker does not change `status`, which is about the backends only: while Jev is skipped, customers still get answers from the right models.
@@ -75,6 +77,25 @@ docker compose -f compose.yml -f compose.labelswap.yml up -d --build --wait
 ```
 
 Send ten standard messages, such as "My card has not arrived". Each one gets a well-formed reply about a lost or stolen card. Every format check passes and the controller does nothing, but `GET /v1/health` shows `qwen3-1.7b` with a disagreement rate of 1.0 and status `above_baseline`, and the **Health** screen shows the banner. Return to normal with `docker compose up -d --wait`.
+
+### Operator routes
+
+Operators can act on the models without restarting the stack. Every operator route needs the header `Authorization: Bearer <APP_OPERATOR_TOKEN>`. While `APP_OPERATOR_TOKEN` is unset, which is the default, the routes answer 403. A missing or wrong token gets 401. Caddy proxies `/v1`, so the token is the only guard: set a long random one (at least 16 characters; leading and trailing spaces are dropped) only in `env/.env`, and never share it with testers.
+
+- `POST /v1/operator/models/{name}/disable` holds a model disabled until an operator enables it. There is no cooldown. Like the controller, it refuses to disable the last usable model (409). Traffic moves with `fallback_reason: "selected_backend_disabled"`.
+- `POST /v1/operator/models/{name}/enable` lifts an operator hold, and also ends a controller cooldown early. The model starts with an empty window.
+- Holds live in gateway memory. After a restart every held model serves again, even though the last stored intervention for it still says `operator_disabled`. Disable it again after a restart.
+- Both take an optional JSON body `{"reason": "..."}` (up to 200 characters), saved in the intervention log as `operator_disabled` or `operator_enabled`. The reason is public: `GET /v1/health` lists it without a token. Do not put customer data or anything private in it. Both return the monitor rows; `disabled_by_operator` shows a hold.
+- `POST /v1/faults` sets a simulated fault on a mock model while it runs, in place of restarting with a Compose override. The body is `{"model": "qwen3-1.7b", "fault": "outage", "rate": 1}`. `fault` is `outage` (sets `error_rate`), `bad_format` (`fault_rate`), `label_swap` (`label_swap_rate`) or `none` (clears all three). `rate` is 0–1 and defaults to 1. It returns the model's config. Faults reset when the gateway restarts.
+
+```bash
+TOKEN='your-operator-token'
+curl -fsS -X POST http://localhost:8080/v1/faults \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"model": "qwen3-1.7b", "fault": "outage"}'
+curl -fsS -X POST http://localhost:8080/v1/operator/models/qwen3-1.7b/enable \
+  -H "Authorization: Bearer $TOKEN"
+```
 
 ## Run with Docker Compose
 
@@ -209,13 +230,15 @@ Pydantic Settings reads `.env` then `env/.env` in native local runs. Process env
 | `APP_STORE` | `memory` | `memory` (lost on restart) or `postgres`; Compose sets `postgres` |
 | `APP_DATABASE_URL` | none | Postgres URL, required when `APP_STORE=postgres`; a secret, hidden in logs and settings output |
 | `APP_STORE_TIMEOUT_SECONDS` | `2` | Longest wait for one store write before the reply goes out without it |
-| `APP_PROVIDER_MODE` | `mock` | `mock` or `real`. Real mode needs `APP_JEV_API_KEY` and an `https` `APP_JEV_BASE_URL`, and is rejected at startup until the real clients exist |
-| `APP_JEV_BASE_URL` | `https://api.typesafe.ai` | TypeSafe API for real Jev calls (not used yet) |
+| `APP_JEV_MODE` | `mock` | `mock` or `real`. Real sends each chat message to TypeSafe for the route and intent answers; it needs `APP_JEV_API_KEY` and an `https` `APP_JEV_BASE_URL` |
+| `APP_PROVIDER_MODE` | `mock` | `mock` or `real` for the Qwen backends. Real needs `APP_JEV_API_KEY` and an `https` `APP_JEV_BASE_URL`, and is rejected at startup until the vLLM client is wired |
+| `APP_JEV_BASE_URL` | `https://api.typesafe.ai` | TypeSafe API, used when `APP_JEV_MODE=real` |
 | `APP_JEV_API_KEY` | unset | Server-side TypeSafe key; set only in the real env file |
 | `APP_JEV_MODEL` | `jev-1.14.0` | Pinned Jev version, not an alias such as `jev-latest` |
 | `APP_JEV_INPUT_PRICE_PER_MILLION_USD` | unset | Jev input token price for cost estimates; Jev does not charge for output tokens. Cost stays null while unset |
 | `APP_JEV_BREAKER_FAILURES` | `5` | Consecutive Jev failures before the circuit breaker skips Jev (not used yet) |
 | `APP_JEV_BREAKER_COOLDOWN_SECONDS` | `30` | How long the breaker skips Jev (not used yet) |
+| `APP_OPERATOR_TOKEN` | unset | Bearer token for the operator routes, at least 16 characters; unset turns them off (403). Set it only in `env/.env` |
 | `APP_REQUEST_DEADLINE_SECONDS` | `45` | Total time for one chat request, including the Jev call. A first attempt that runs out of time counts as a failed call; an alternate cut short gives a 503 with `deadline_exceeded` |
 | `APP_ALTERNATE_RESERVE_SECONDS` | `15` | Part of the deadline held back from the first attempt for the other backend, only when the other backend is usable; with the Jev timeout, must stay below the deadline |
 
@@ -304,7 +327,9 @@ curl -fsS "http://localhost:8080/v1/requests/$REQUEST_ID"
 | --- | --- |
 | `POST /v1/chat` | 200 validated reply; 422 invalid input; 503 no backend available or able to answer, or `deadline_exceeded` |
 | `GET /v1/requests/{id}` | 200 stored response; 404 missing, evicted, or lost in a restart with the memory store; 422 invalid UUID |
-| `GET /v1/health` | Typed Pydantic response documented in OpenAPI; 200 with backend config, monitor statistics, recent interventions, recent requests (`recent_requests`) and per-model call totals (`usage`); `degraded` when any backend is unavailable or disabled by the controller |
+| `GET /v1/health` | Typed Pydantic response documented in OpenAPI; 200 with backend config, monitor statistics, recent interventions, recent requests (`recent_requests`) and per-model call totals (`usage`); `degraded` when any backend is unavailable or disabled by the controller or an operator |
+| `POST /v1/operator/models/{name}/disable`, `/enable` | Operator token required. 200 monitor rows; 401 missing or wrong token; 409 last usable model (disable); 422 unknown model; 403 `APP_OPERATOR_TOKEN` unset |
+| `POST /v1/faults` | Operator token required. 200 the model's config; 401, 403 and 422 as above |
 | `GET /docs`, `/redoc`, `/openapi.json` | Interactive documentation and API schema |
 
 Messages must contain 1–2,000 characters and cannot be whitespace-only. Extra request fields are rejected.
@@ -417,4 +442,4 @@ CI runs these checks, the frontend tests and build, a Compose smoke test through
 - `tests/`: unit and API tests. `scripts/smoke_compose.py`: public-proxy smoke test.
 - `discussion.md`, `problem2-local-run.md`, benchmark results: historical Assignment 2 records. The original SmolLM2 implementation and measurement scripts remain in Git history before this prototype.
 
-`Router` is a small async interface returning a validated `JevResult`: the route and intent answers, each checked on its own, plus the model and token counts. A future real Jev client can implement it, and a real vLLM client can implement `Backend` (returning intent, reply and facts), without changing the HTTP contract or the frontend. `Store` works the same way for storage. The rest of the planned architecture is follow-up work.
+`Router` is a small async interface returning a validated `JevResult`: the route and intent answers, each checked on its own, plus the model and token counts. `TypeSafeJevRouter` implements it for real Jev (`APP_JEV_MODE=real`), and a real vLLM client can implement `Backend` (returning intent, reply and facts), without changing the HTTP contract or the frontend. `Store` works the same way for storage. The rest of the planned architecture is follow-up work.

@@ -48,8 +48,10 @@ class Settings(BaseSettings):
     # Longest wait for one store write before the reply goes out without it.
     store_timeout_seconds: float = Field(default=2, gt=0, le=30)
 
-    # Real providers (docs/JEV_QWEN_INTEGRATION_PLAN.md). Mock is the default;
-    # real mode is rejected at startup until the clients exist.
+    # Real providers (docs/JEV_QWEN_INTEGRATION_PLAN.md). Mock is the default.
+    # jev_mode=real sends each message to TypeSafe. provider_mode covers the
+    # Qwen backends; its real mode is rejected until the vLLM client is wired.
+    jev_mode: Literal["mock", "real"] = "mock"
     provider_mode: Literal["mock", "real"] = "mock"
     jev_base_url: AnyHttpUrl = AnyHttpUrl("https://api.typesafe.ai")
     jev_api_key: SecretStr | None = None
@@ -59,6 +61,9 @@ class Settings(BaseSettings):
     jev_input_price_per_million_usd: float | None = Field(default=None, ge=0)
     jev_breaker_failures: int = Field(default=5, ge=1, le=1000)
     jev_breaker_cooldown_seconds: float = Field(default=30, gt=0, le=3600)
+    # Bearer token for the operator routes (auth.py). Unset, empty or blank:
+    # they answer 403. Set it only in the real env file, never in Git.
+    operator_token: SecretStr | None = None
     request_deadline_seconds: float = Field(default=45, gt=0, le=600)
     alternate_reserve_seconds: float = Field(default=15, gt=0, le=600)
 
@@ -98,6 +103,20 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def operator_token_is_long(self) -> "Settings":
+        if self.operator_token is None:
+            return self
+        # The header value is stripped before the compare, so strip the token.
+        value = self.operator_token.get_secret_value().strip()
+        if not value:
+            self.operator_token = None
+        elif len(value) < 16:
+            raise ValueError("APP_OPERATOR_TOKEN must be at least 16 characters")
+        else:
+            self.operator_token = SecretStr(value)
+        return self
+
+    @model_validator(mode="after")
     def deadline_leaves_time_for_both_attempts(self) -> "Settings":
         if (
             self.jev_timeout_seconds + self.alternate_reserve_seconds
@@ -111,17 +130,25 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def real_mode_needs_a_jev_key(self) -> "Settings":
-        if self.provider_mode == "real" and (
-            self.jev_api_key is None or not self.jev_api_key.get_secret_value()
+        for name, mode in (
+            ("jev_mode", self.jev_mode),
+            ("provider_mode", self.provider_mode),
         ):
-            raise ValueError("provider_mode 'real' needs APP_JEV_API_KEY")
+            if mode == "real" and (
+                self.jev_api_key is None or not self.jev_api_key.get_secret_value()
+            ):
+                raise ValueError(f"{name} 'real' needs APP_JEV_API_KEY")
         return self
 
     @model_validator(mode="after")
     def real_mode_needs_https(self) -> "Settings":
         # The client sends the API key with every request.
-        if self.provider_mode == "real" and self.jev_base_url.scheme != "https":
-            raise ValueError("provider_mode 'real' needs an https APP_JEV_BASE_URL")
+        for name, mode in (
+            ("jev_mode", self.jev_mode),
+            ("provider_mode", self.provider_mode),
+        ):
+            if mode == "real" and self.jev_base_url.scheme != "https":
+                raise ValueError(f"{name} 'real' needs an https APP_JEV_BASE_URL")
         return self
 
 
