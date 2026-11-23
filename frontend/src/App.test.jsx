@@ -7,6 +7,7 @@ import {
   degradedHealth,
   fakeGateway,
   healthyHealth,
+  operatorHeldHealth,
   jevOutageHealth,
   labelSwapHealth,
   lowCoverageHealth,
@@ -366,6 +367,18 @@ describe("Issue 31", () => {
     await user.click(screen.getByRole("button", { name: "Health" }));
     expect(await screen.findByText(/Jev calls go to TypeSafe/)).toBeInTheDocument();
     expect(screen.queryByText(/Mock mode: token usage/)).not.toBeInTheDocument();
+  });
+});
+
+describe("Operator routes", () => {
+  it("shows a model held by an operator as disabled", async () => {
+    const user = renderWith(fakeGateway({ health: operatorHeldHealth }));
+    await user.click(screen.getByRole("button", { name: "Health" }));
+    expect(await screen.findByText(/qwen3-1\.7b was disabled by an operator/)).toBeInTheDocument();
+    const card = screen.getByRole("region", { name: "qwen3-1.7b" });
+    expect(within(card).getByText("Disabled")).toBeInTheDocument();
+    expect(within(card).getByText("when an operator enables it")).toBeInTheDocument();
+    expect(screen.getByText("disabled by operator")).toBeInTheDocument();
   });
 });
 
