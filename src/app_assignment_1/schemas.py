@@ -144,9 +144,15 @@ class BackendMonitor(StrictModel):
     call_errors: int = Field(ge=0)
     failure_rate: float | None = Field(ge=0, le=1)
     disabled_by_controller: bool
+    # Why the controller disabled it: format failures and call errors, or
+    # intents that differ from Jev's (a last resort when no other model answers).
+    disabled_for: Literal["failure", "semantic"] | None = None
     # Held by POST /v1/operator/models/{name}/disable until an operator enables it.
     disabled_by_operator: bool = False
     disabled_for_seconds: float | None = Field(default=None, ge=0)
+    # Has calls in its failure window, at a rate below the threshold. A
+    # semantic disable of the other model needs this.
+    answering: bool = False
 
 
 InterventionAction = Literal[
@@ -193,6 +199,19 @@ class ModelUsage(StrictModel):
     estimated_cost_usd: float | None = None
 
 
+class JevUsage(StrictModel):
+    """Jev calls that returned an answer since the gateway started, and their
+    tokens. Each call counts once, not once per question."""
+
+    mocked: bool
+    answered_calls: int = Field(ge=0)
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    # Input tokens times APP_JEV_INPUT_PRICE_PER_MILLION_USD; Jev does not
+    # charge for output tokens. None while the price is unset.
+    estimated_cost_usd: float | None = Field(default=None, ge=0)
+
+
 class JevBreakerStatus(StrictModel):
     """The Jev circuit breaker. While it is not closed, the rule router routes
     most or all messages."""
@@ -222,6 +241,9 @@ class SemanticStatus(StrictModel):
     rerouted_agreements: int = Field(ge=0)
     rerouted_disagreements: int = Field(ge=0)
     rerouted_no_signal: int = Field(ge=0)
+    # Replies since the gateway started that were not scored, because one of
+    # Jev and the model is a mock and the other is real.
+    not_compared: int = Field(default=0, ge=0)
 
 
 class SemanticRules(StrictModel):
@@ -230,6 +252,8 @@ class SemanticRules(StrictModel):
     min_coverage: float = Field(ge=0, le=1)
     baseline_disagreement_rate: float | None = Field(ge=0, le=1)
     alert_margin: float = Field(ge=0, le=1)
+    # Whether the controller disables a model that is above the baseline.
+    actions_enabled: bool
 
 
 class HealthResponse(StrictModel):
@@ -245,5 +269,6 @@ class HealthResponse(StrictModel):
     interventions: list[Intervention]
     controller: ControllerRules
     jev_breaker: JevBreakerStatus
+    jev_usage: JevUsage
     semantic: list[SemanticStatus]
     semantic_rules: SemanticRules
