@@ -536,6 +536,7 @@ class Gateway:
         generated: BackendReply | None = None
         tried: list[Backend] = []
         deadline_exceeded = False
+        reserve_held = False
         # Two passes. First, the models that are usable now. If none answered,
         # every model not called yet:
         # - one whose cooldown ended while another model's call ran is usable
@@ -565,7 +566,11 @@ class Gateway:
                         reasons.append("semantic_last_resort")
                 remaining = self.request_deadline - (perf_counter() - start)
                 if remaining <= 0:
-                    deadline_exceeded = True
+                    # The deadline cut this model out only if time was held
+                    # back for it. If the last attempt had all the time,
+                    # because no model could follow it then, its timeout was a
+                    # failure and this is the usual 503.
+                    deadline_exceeded = not tried or reserve_held
                     break
                 # Hold back the reserve only on the first attempt, and only when
                 # another model, a last resort included, could still answer.
@@ -578,6 +583,7 @@ class Gateway:
                 if budget <= 0:
                     deadline_exceeded = True
                     break
+                reserve_held = budget < remaining
                 tried.append(backend)
                 generated, action, cut_short = await self._attempt(
                     backend, message, budget, len(tried), action
