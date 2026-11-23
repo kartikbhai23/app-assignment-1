@@ -15,9 +15,10 @@ The [README](../README.md#monitor-and-controller) explains each part in detail; 
 | A model's reply is malformed | The format check | The customer gets a fixed "could not produce a valid reply" message; the failure goes into the window | Per request |
 | A model keeps failing | Failure rate of 50% or more (`APP_MONITOR_FAILURE_THRESHOLD`) over its last 20 calls (`APP_MONITOR_WINDOW`), with at least 5 calls (`APP_MONITOR_MIN_SAMPLES`) | The controller disables it for 60 s (`APP_CONTROLLER_COOLDOWN_SECONDS`). Its route's traffic goes to the other model (`selected_backend_disabled`) | Re-enabled with an empty window when the next request, Health check or Prometheus scrape after the cooldown looks at it |
 | The failing model is the only one left | Same as above | The controller does not disable it. It logs `kept_last_backend` once and keeps serving | When the rate drops below the threshold |
-| A model gives well-formed replies with the wrong intent | The semantic monitor: its intent disagrees with Jev's more than the baseline plus 0.15 | Nothing. On `main` the semantic monitor only reports: status `above_baseline`, a red banner on Health, and an alert | An operator acts (see [PossibleWrongIntents](#possiblewrongintents)) |
+| A model gives well-formed replies with the wrong intent | The semantic monitor: its intent disagrees with Jev's more than the baseline plus 0.15. Only replies where Jev and the model are both mocks or both real are compared | By default, nothing: status `above_baseline`, a red banner on Health, and an alert. With `APP_SEMANTIC_ACTIONS_ENABLED=true`, the controller disables it like a failing model, but only while the other model is answering | The cooldown, or an operator (see [PossibleWrongIntents](#possiblewrongintents)) |
+| The other model fails while one is disabled for wrong intents | The second model's call fails | The model disabled for its intents still answers, as a last resort (`fallback_reason` ending in `semantic_last_resort`): a possibly wrong intent beats a 503. A model disabled for failures or held by an operator is never a last resort | Per request |
 | A request runs long | The request deadline (`APP_REQUEST_DEADLINE_SECONDS`, 45 s) | The first model gets the deadline minus 15 s (`APP_ALTERNATE_RESERVE_SECONDS`) when the other model can still answer, so a fallback has time. If the deadline cuts the fallback short, the request gets a 503 with `deadline_exceeded` | Per request |
-| No model can answer | Both are unavailable, disabled or held, or both failed this request | 503 `No mock backend is available` | When a model is usable again |
+| No model can answer | Both are unavailable, disabled for failures or held, or both failed this request | 503 `No mock backend is available`. If the other model's cooldown ends during the failing call, it answers instead | When a model is usable again |
 | The database is slow or down | A store write takes longer than `APP_STORE_TIMEOUT_SECONDS` (2 s) or fails | The customer still gets the reply, but it can't be looked up by id. Interventions that fail to save are kept and retried in order | When the database answers again |
 
 Two limits to keep in mind:
@@ -29,11 +30,12 @@ Two limits to keep in mind:
 1. **Health screen:** `http://localhost:8080/#/health`, refreshed every 5 seconds. It shows a banner when a model is out or above the semantic baseline, and a note while Jev is skipped. Below it are the monitor and semantic tables, recent requests and the intervention log.
 2. **`GET /v1/health`:** the same data as JSON. The fields that matter most here:
    - `status`: `degraded` when any model is unavailable, disabled or held;
-   - `monitor`: per model, the samples, failures, `disabled_by_controller`, `disabled_by_operator` and `disabled_for_seconds`;
+   - `monitor`: per model, the samples, failures, `disabled_by_controller`, `disabled_for` (`failure` or `semantic`), `disabled_by_operator`, `disabled_for_seconds` and `answering`;
    - `interventions`: the last 50, oldest first, each with its reason, such as `format failure rate 100% over last 5 calls`;
    - `jev_breaker`: the state (`closed`, `open` or `half_open`) and consecutive failures;
-   - `semantic`: per model, the disagreement rate, coverage and status;
+   - `semantic`: per model, the disagreement rate, coverage, status and `not_compared` (replies skipped because one of Jev and the model is a mock);
    - `usage`: attempted, completed and failed calls per model since startup.
+   - `jev_usage`: answered Jev calls, tokens and estimated cost since startup (null cost while `APP_JEV_INPUT_PRICE_PER_MILLION_USD` is unset).
 3. **Prometheus alerts.** Prometheus has no published port, so use `exec`:
 
    ```bash
@@ -90,6 +92,7 @@ Check the newest `disabled` intervention for the model on Health. Its reason say
 - **`format failure rate ...`:** the replies were malformed. With a real model, look at its output. With the mocks, a fault is set: the chaos override, or `POST /v1/faults` with `bad_format`.
 - **`call error rate ...`:** calls raised. With a real model, its server is down, unreachable or timing out. With the mocks: the outage override, or `/v1/faults` with `outage`.
 - **`failure rate ...`:** a mix of both.
+- **`intent differs from Jev's on ...`:** a semantic disable, only with `APP_SEMANTIC_ACTIONS_ENABLED=true`. `disabled_for` is `semantic`, and the model still answers as a last resort. See [PossibleWrongIntents](#possiblewrongintents).
 
 Do:
 - **A one-off:** the model is re-enabled after the cooldown with an empty window. Nothing to do.
@@ -119,7 +122,11 @@ Check the semantic table on Health:
 - **Mock mode:** Jev and both models share one keyword classifier, and the label-swap override sets a baseline of 0. Any disagreement there is a simulated fault: `compose.labelswap.yml`, or `/v1/faults` with `label_swap`.
 - **Real mode:** Jev can be wrong too, and the baseline is a placeholder until it is set from dev data. Look at recent requests before trusting the rate.
 
-Do: on `main` the gateway takes no action for wrong intents. If you are confident the model is wrong, hold it with an operator disable, and its route's traffic goes to the other model. For a mock fault, clear it with `"fault": "none"`.
+Do:
+- **Semantic actions off** (the default): the gateway takes no action. If you are confident the model is wrong, hold it with an operator disable, and its route's traffic goes to the other model.
+- **Semantic actions on** (`compose.labelswap.yml` turns them on): the controller disables the model once the other one is answering, and [ModelDisabledByController](#modeldisabledbycontroller) fires. If it logs `kept_last_backend` instead, the other model isn't answering, so check it first.
+- **Doubtful about the rate** (low coverage, or no baseline from dev data yet): leave semantic actions off.
+- **A mock fault:** clear it with `"fault": "none"`.
 
 It clears when the model is back within the baseline plus margin.
 
