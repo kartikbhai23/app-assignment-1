@@ -11,17 +11,17 @@ docker compose -f compose.yml -f compose.demo.yml up -d --build --wait
 python3 scripts/smoke_compose.py http://localhost:8080   # optional check
 ```
 
-`compose.demo.yml` sets a public throwaway operator token (the script knows it), the mock semantic baseline of 0, semantic actions on, and a 20 second cooldown. Open the Health screen at `http://localhost:8080/#/health` on the projector and keep it visible; it refreshes every 5 seconds.
+`compose.demo.yml` sets a public throwaway operator token (the script knows it), the mock semantic baseline of 0, semantic actions on, and a 30 second cooldown. Open the Health screen at `http://localhost:8080/#/health` on the projector and keep it visible; it refreshes every 5 seconds.
 
 ## Run it
 
 ```bash
-python3 scripts/chaos_demo.py                  # all three scenarios; each waits out the 20 second cooldown
+python3 scripts/chaos_demo.py                  # all three scenarios; each waits out the 30 second cooldown
 python3 scripts/chaos_demo.py --scenario outage
 python3 scripts/chaos_demo.py --prometheus     # also query Prometheus after each scenario
 ```
 
-Scenarios: `bad_format`, `outage`, `label_swap`. Each one clears every fault and resets both models first, so you can rerun any of them in any order. The script exits with a non-zero status and `DEMO FAILED` if the stack does not behave as described below.
+Scenarios: `bad_format`, `outage`, `label_swap`. Each one clears every fault and empties both models' windows first (a model with old samples is briefly held and enabled by the operator routes, which adds two interventions to the log), so you can rerun any of them in any order. The script exits with a non-zero status and `DEMO FAILED` if the stack does not behave as described below.
 
 ## What to say, per scenario
 
@@ -31,13 +31,13 @@ Scenarios: `bad_format`, `outage`, `label_swap`. Each one clears every fault and
 | `outage` | Every call to the small model raises an error | Every request is still answered, by `qwen3-4b`, with `selected_backend_error`; the controller disables the small model within about five calls | Failure monitor (call errors) |
 | `label_swap` | Small model answers well-formed replies for the wrong intent | Every format check passes, so the failure monitor sees nothing; after about ten replies the semantic monitor sees the intents disagree with Jev's, and the controller disables the model | Semantic monitor |
 
-After the disable, the script clears the fault and keeps sending the same message every two seconds. Replies keep coming from `qwen3-4b` until the cooldown ends, then `qwen3-1.7b` answers again (the controller re-enables a model when it next checks, so it takes a request to notice).
+After the disable, the script clears the fault (after the Prometheus snapshot, with `--prometheus`) and keeps sending the same message every two seconds. Replies keep coming from `qwen3-4b` until the cooldown ends, then `qwen3-1.7b` answers again (the controller re-enables a model when it next checks, so it takes a request to notice).
 
-At the end the script prints the messages and seconds it measured in that run. They come from one run on mocks with a 20 second cooldown. Quote them as that, not as averages or as real-model results.
+At the end the script prints the messages and seconds it measured in that run. "To recover" counts from the disable until the small model answers again. They come from one run on mocks with a 30 second cooldown. Quote them as that, not as averages or as real-model results.
 
 ## Prometheus views
 
-Prometheus publishes no port, by design. `--prometheus` waits one 15 second scrape and then prints these queries through `docker compose exec`. You can run any of them by hand:
+Prometheus publishes no port, by design. `--prometheus` takes its snapshot while the small model is still disabled: it waits one 15 second scrape, then prints these queries through `docker compose exec`. So `gateway_model_disabled` reads 1 for the small model, and after `label_swap` the disagreement rate shows what the controller acted on. You can run any of them by hand:
 
 ```bash
 docker compose exec prometheus wget -qO- 'http://127.0.0.1:9090/api/v1/query?query=gateway_model_disabled'

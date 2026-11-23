@@ -92,10 +92,18 @@ def show(step: int, kind: str, reply: dict[str, Any], out: Callable[[str], None]
 
 
 def reset(api: Any) -> None:
-    """Clear every fault and give both models a fresh window."""
+    """Clear every fault and give both models an empty window.
+
+    An operator enable only clears a window while a model is held or cooling
+    down, so a model with old samples is held and then enabled. One model at a
+    time, so the last usable model is never held."""
     for model in (SMALL, LARGE):
         api.call("/v1/faults", {"model": model, "fault": "none"})
-        api.call(f"/v1/operator/models/{model}/enable", {"reason": "demo reset"})
+    for model in (SMALL, LARGE):
+        if monitor(api, model)["samples"] > 0:
+            body = {"reason": "demo reset"}
+            api.call(f"/v1/operator/models/{model}/disable", body)
+            api.call(f"/v1/operator/models/{model}/enable", body)
 
 
 def run_scenario(
@@ -104,6 +112,7 @@ def run_scenario(
     out: Callable[[str], None] = print,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
+    while_disabled: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     fault, story = SCENARIOS[name]
     out(f"\n=== {name}: {story}")
@@ -135,6 +144,9 @@ def run_scenario(
     if after["model"] != LARGE or after["format"] != "passed":
         raise DemoError(f"traffic did not move to {LARGE} cleanly: {after}")
 
+    if while_disabled:
+        # Runs while the small model is still held out, so a snapshot shows it.
+        while_disabled()
     api.call("/v1/faults", {"model": SMALL, "fault": "none"})
     cleared = clock()
     out(f"  fault cleared; waiting for the {rules['cooldown_seconds']:g} s cooldown")
@@ -147,7 +159,7 @@ def run_scenario(
         show(step, "standard", reply, out)
         if reply["model"] == SMALL and reply["format"] == "passed":
             break
-    recovered = clock() - cleared
+    recovered = clock() - (injected + detected)  # from the disable
     return {
         "scenario": name,
         "messages_to_disable": sent,
@@ -176,6 +188,7 @@ def prometheus(out: Callable[[str], None] = print) -> None:
 
 def summary(results: list[dict[str, Any]], out: Callable[[str], None] = print) -> None:
     out("\nMeasured in this run (one run each; not an average)")
+    out("  'to recover' counts from the disable until the small model answers again")
     out(f"  {'scenario':<12} {'messages':>8} {'to disable':>11} {'to recover':>11}")
     for r in results:
         out(
@@ -195,9 +208,11 @@ def main(argv: list[str]) -> int:
     results = []
     try:
         for name in names:
-            results.append(run_scenario(api, name))
-            if args.prometheus:
-                prometheus()
+            results.append(
+                run_scenario(
+                    api, name, while_disabled=prometheus if args.prometheus else None
+                )
+            )
         reset(api)
     except DemoError as error:
         print("DEMO FAILED: " + str(error), file=sys.stderr)
