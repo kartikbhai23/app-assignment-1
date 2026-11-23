@@ -237,14 +237,17 @@ class Controller:
         interventions: Sequence[Intervention],
         samples: Sequence[MonitorSample],
         now: datetime,
+        operator_actions: Sequence[Intervention] | None = None,
     ) -> dict[BackendName, datetime | None]:
         """Rebuild the windows, cooldowns and operator holds after a restart.
 
         A cooldown still running when the gateway stopped resumes for the time
         left, unless an operator ended it. A re-enable, by the controller or an
         operator, clears a model's window, so only samples after the last one
-        go back in, or after a disable whose cooldown has since ended. A model
-        whose last operator action was a disable is held again. A resumed
+        go back in, or after the end of a cooldown that ended while it was
+        stopped. A model whose last operator action was a disable is held
+        again; `operator_actions`, when given, is where that is read from, so
+        a hold older than `interventions` still counts. A resumed
         cooldown keeps its reason, failure or semantic, so a semantic disable
         is still a last resort.
         `interventions` and `samples` are oldest first. Returns each model's
@@ -271,11 +274,18 @@ class Controller:
                     )
                     enabled = [e for e in events if e.action != "disabled"]
                     cutoff = enabled[-1].at if enabled else None
+                elif last.action == "disabled":
+                    # The cooldown ended while the gateway was stopped. Live,
+                    # the re-enable at its end clears the window, which drops
+                    # samples from calls still running during the cooldown.
+                    cutoff = last.at + timedelta(seconds=self.cooldown)
                 else:
                     cutoff = last.at
             holds = [
                 i.action
-                for i in interventions
+                for i in (
+                    interventions if operator_actions is None else operator_actions
+                )
                 if i.backend == name
                 and i.action in ("operator_disabled", "operator_enabled")
             ]

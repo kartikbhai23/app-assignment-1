@@ -319,3 +319,112 @@ def test_with_actions_on_the_semantic_window_starts_after_the_re_enable(
     assert own == (own_after or ["disagree", "agree"])
     # Rerouted samples are never reset by a re-enable.
     assert list(g.semantic.rerouted[SMALL]) == ["disagree"]
+
+
+def test_samples_from_an_ended_cooldown_do_not_come_back():
+    # Review of #100: calls still running during a cooldown save samples. Live,
+    # the re-enable at the cooldown's end clears them, so a restart after the
+    # cooldown ended must drop them too.
+    c = Controller([SMALL, LARGE], Settings(_env_file=None), clock=lambda: 0.0)
+    disabled_at = NOW - timedelta(minutes=2)
+    samples = [
+        failure(disabled_at - timedelta(seconds=5), "format_failure"),
+        failure(disabled_at + timedelta(seconds=10), "format_failure"),
+        failure(disabled_at + timedelta(seconds=50), "format_failure"),
+        failure(disabled_at + timedelta(seconds=61), "ok"),
+    ]
+    c.restore([event(disabled_at, "disabled")], samples, NOW)
+    assert list(c.windows[SMALL]) == ["ok"]
+
+
+def test_with_actions_on_last_resort_replies_from_a_cooldown_do_not_come_back():
+    settings = Settings(_env_file=None, semantic_actions_enabled=True)
+    store = MemoryStore(settings.request_store_limit)
+    disabled_at = NOW - timedelta(minutes=2)
+    samples = [
+        semantic(disabled_at + timedelta(seconds=s), "disagree") for s in (5, 20, 40)
+    ]
+
+    async def go() -> Gateway:
+        await store.save_interventions([event(disabled_at, "disabled")])
+        await store.save_monitor_samples(samples)
+        g = gateway(settings, store)
+        await g.restore()
+        return g
+
+    g = asyncio.run(go())
+    assert list(g.semantic.windows[SMALL]) == []
+
+
+def test_a_cancelled_sample_save_keeps_the_samples():
+    class Slow(MemoryStore):
+        async def save_monitor_samples(self, items):
+            await asyncio.sleep(10)
+
+    settings = Settings(_env_file=None)
+    g = gateway(settings, Slow(settings.request_store_limit))
+    g.controller.record(SMALL, failed=False, can_disable=True)
+    g.semantic.record(SMALL, "agree", rerouted=False)
+    pending = sorted(
+        g.controller.unsaved_samples + g.semantic.unsaved, key=lambda s: s.at
+    )
+
+    async def go() -> None:
+        task = asyncio.create_task(g.save_interventions())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("the cancel must pass on")
+
+    asyncio.run(go())
+    kept = g.controller.unsaved_samples + g.semantic.unsaved
+    assert sorted(kept, key=lambda s: s.at) == pending
+
+
+def test_sample_saves_keep_their_order():
+    # Review of #100: without a lock, a slow first save could land after a
+    # fast second one, and the restore would rebuild the pair inverted.
+    class FirstSlow(MemoryStore):
+        calls = 0
+
+        async def save_monitor_samples(self, items):
+            FirstSlow.calls += 1
+            if FirstSlow.calls == 1:
+                await asyncio.sleep(0.2)
+            await super().save_monitor_samples(items)
+
+    settings = Settings(_env_file=None)
+    store = FirstSlow(settings.request_store_limit)
+    g = gateway(settings, store)
+
+    async def go() -> None:
+        g.controller.record(SMALL, failed=True, can_disable=True)
+        first = asyncio.create_task(g.save_interventions())
+        await asyncio.sleep(0.05)
+        g.controller.record(SMALL, failed=False, can_disable=True)
+        await asyncio.gather(first, g.save_interventions())
+
+    asyncio.run(go())
+    assert [s.outcome for s in store.monitor_samples] == ["format_failure", "ok"]
+
+
+def test_a_hold_older_than_the_restored_interventions_comes_back():
+    settings = Settings(_env_file=None)
+    store = MemoryStore(settings.request_store_limit, intervention_limit=1000)
+    old = NOW - timedelta(days=30)
+    noise = [
+        event(old + timedelta(minutes=i + 1), "kept_last_backend", LARGE)
+        for i in range(600)
+    ]
+
+    async def go() -> Gateway:
+        await store.save_interventions([event(old, "operator_disabled"), *noise])
+        g = gateway(settings, store)
+        await g.restore()
+        return g
+
+    assert asyncio.run(go()).controller.held == {SMALL}

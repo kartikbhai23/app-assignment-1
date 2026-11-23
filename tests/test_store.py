@@ -587,3 +587,29 @@ def test_a_restarted_app_resumes_from_postgres(postgres_url: str) -> None:
     assert [m["samples"] for m in after["monitor"]] == [
         m["samples"] for m in before["monitor"]
     ]
+
+
+def test_latest_operator_actions_per_model(make_store: MakeStore) -> None:
+    start = datetime(2026, 11, 22, 12, tzinfo=UTC)
+
+    def item(seconds: int, backend: str, action: str) -> Intervention:
+        return Intervention(
+            at=start + timedelta(seconds=seconds),
+            backend=backend,
+            action=action,
+            reason="test",
+        )
+
+    items = [
+        item(0, "qwen3-1.7b", "operator_disabled"),
+        item(1, "qwen3-4b", "operator_disabled"),
+        item(2, "qwen3-4b", "operator_enabled"),
+        item(3, "qwen3-4b", "disabled"),
+        item(4, "qwen3-1.7b", "kept_last_backend"),
+    ]
+
+    async def body(store: Store) -> None:
+        await store.save_interventions(items)
+        assert await store.latest_operator_actions() == [items[0], items[2]]
+
+    run(make_store(), body)

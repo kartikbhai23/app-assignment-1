@@ -144,6 +144,7 @@ class Gateway:
         # delays a reply by seconds, not by the pool's 30-second default.
         self.store_timeout = settings.store_timeout_seconds
         self.save_lock = asyncio.Lock()
+        self.sample_lock = asyncio.Lock()
         # Request saves still running after their request was cancelled. The
         # event loop keeps only weak references to tasks, so these keep them.
         self.pending_saves: set[asyncio.Task[None]] = set()
@@ -276,20 +277,34 @@ class Gateway:
         await self._save_samples()
 
     async def _save_samples(self) -> None:
-        """Save new window samples. On failure they are dropped, not retried:
-        the live windows are unaffected, and a later restart just rebuilds
-        from fewer samples."""
-        samples = self.controller.unsaved_samples + self.semantic.unsaved
-        if not samples:
+        """Save new window samples, one batch at a time so the store keeps
+        their order. If the store fails they are dropped, not retried: the
+        live windows are unaffected, and a later restart just rebuilds from
+        fewer samples. A cancel, such as a /v1/health call whose client left,
+        keeps them for the next save, then passes on."""
+        if not (self.controller.unsaved_samples or self.semantic.unsaved):
             return
-        self.controller.unsaved_samples, self.semantic.unsaved = [], []
-        samples.sort(key=lambda s: s.at)
-        try:
-            await asyncio.wait_for(
-                self.store.save_monitor_samples(samples), self.store_timeout
-            )
-        except Exception as exc:
-            logger.warning("Could not save monitor samples (%s)", type(exc).__name__)
+        async with self.sample_lock:
+            samples = self.controller.unsaved_samples + self.semantic.unsaved
+            if not samples:
+                return
+            self.controller.unsaved_samples, self.semantic.unsaved = [], []
+            samples.sort(key=lambda s: s.at)
+            try:
+                await asyncio.wait_for(
+                    self.store.save_monitor_samples(samples), self.store_timeout
+                )
+            except BaseException as exc:
+                if not isinstance(exc, Exception):
+                    # Both lists are merged and sorted on the next save, so
+                    # putting the batch back in one of them is enough.
+                    self.controller.unsaved_samples = (
+                        samples + self.controller.unsaved_samples
+                    )
+                    raise
+                logger.warning(
+                    "Could not save monitor samples (%s)", type(exc).__name__
+                )
 
     async def restore(self) -> None:
         """Rebuild the monitor windows and running cooldowns from the store,
@@ -303,10 +318,16 @@ class Gateway:
             samples = await asyncio.wait_for(
                 self.store.recent_monitor_samples(per_window), self.store_timeout
             )
+            # Read apart, so a hold older than the newest interventions counts.
+            operator_actions = await asyncio.wait_for(
+                self.store.latest_operator_actions(), self.store_timeout
+            )
         except Exception as exc:
             logger.warning("Could not restore monitor state (%s)", type(exc).__name__)
             return
-        cutoffs = self.controller.restore(interventions, samples, datetime.now(UTC))
+        cutoffs = self.controller.restore(
+            interventions, samples, datetime.now(UTC), operator_actions
+        )
         # With actions off, a re-enable never resets the semantic window.
         actions = self.semantic.rules.actions_enabled
         self.semantic.restore(samples, cutoffs if actions else None)

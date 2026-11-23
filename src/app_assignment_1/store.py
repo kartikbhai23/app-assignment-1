@@ -28,6 +28,7 @@ MIGRATIONS = Path(__file__).parent / "migrations"
 INTERVENTION_LIMIT = 50
 # Any fixed number works; it only has to be the same for every gateway process.
 MIGRATION_LOCK = 670001
+OPERATOR_ACTIONS = ("operator_disabled", "operator_enabled")
 
 
 class Store(Protocol):
@@ -60,6 +61,11 @@ class Store(Protocol):
 
     async def recent_interventions(self, limit: int) -> list[Intervention]:
         """The last `limit` interventions, oldest first."""
+        ...
+
+    async def latest_operator_actions(self) -> list[Intervention]:
+        """Each model's newest operator_disabled or operator_enabled, however
+        old, oldest first."""
         ...
 
     async def save_monitor_samples(self, items: Sequence[MonitorSample]) -> None: ...
@@ -107,6 +113,13 @@ class MemoryStore:
 
     async def recent_interventions(self, limit: int) -> list[Intervention]:
         return list(self.interventions)[-limit:] if limit > 0 else []
+
+    async def latest_operator_actions(self) -> list[Intervention]:
+        latest: dict[str, Intervention] = {}
+        for item in self.interventions:
+            if item.action in OPERATOR_ACTIONS:
+                latest[item.backend] = item
+        return sorted(latest.values(), key=lambda i: i.at)
 
     async def save_monitor_samples(self, items: Sequence[MonitorSample]) -> None:
         self.monitor_samples.extend(items)
@@ -251,6 +264,24 @@ class PostgresStore:
                 ) AS latest ORDER BY seq
                 """,
                 (limit,),
+            )
+            rows = await cur.fetchall()
+        return [
+            Intervention(at=at, backend=backend, action=action, reason=reason)
+            for at, backend, action, reason in rows
+        ]
+
+    async def latest_operator_actions(self) -> list[Intervention]:
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                SELECT at, backend, action, reason FROM (
+                    SELECT DISTINCT ON (backend) seq, at, backend, action, reason
+                    FROM interventions WHERE action = ANY(%s)
+                    ORDER BY backend, seq DESC
+                ) AS latest ORDER BY seq
+                """,
+                (list(OPERATOR_ACTIONS),),
             )
             rows = await cur.fetchall()
         return [
