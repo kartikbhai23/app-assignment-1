@@ -563,3 +563,25 @@ def test_an_operator_enable_clears_the_reason_and_the_semantic_window(tmp_path):
     assert g.semantic.status(SMALL).samples == 0
     assert not g.controller.is_disabled(SMALL)
     assert [a[1] for a in actions(g)] == ["disabled", "operator_enabled"]
+
+
+class RealJev(MockJevRouter):
+    """The mock's answers, reported as real Jev."""
+
+    mocked = False
+
+    async def route(self, message: str) -> JevResult:
+        result = await super().route(message)
+        return result.model_copy(update={"mocked": False})
+
+
+def test_a_mock_model_is_never_disabled_against_real_jev(tmp_path):
+    # Real Jev and mock models disagree by design, so the replies are not
+    # compared, and the controller never acts on them.
+    settings = make_settings(tmp_path)
+    g = gateway(settings, router=RealJev(settings.intents_path))
+    warm_up(g)
+    replies = send(g, 6)
+    assert all(r.trace.model == SMALL for r in replies)
+    assert actions(g) == []
+    assert g.semantic.not_compared[SMALL] == 6
