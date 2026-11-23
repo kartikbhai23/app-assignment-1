@@ -19,6 +19,7 @@ export const healthyHealth = {
   interventions: [],
   controller: RULES,
   jev_breaker: { state: "closed", consecutive_failures: 0, failure_limit: 5, cooldown_seconds: 30 },
+  jev_usage: { mocked: true, answered_calls: 0, input_tokens: 0, output_tokens: 0, estimated_cost_usd: null },
   // The default: no baseline set, so rates are shown but never flagged.
   semantic: [
     { name: "qwen3-1.7b", samples: 12, agreements: 12, disagreements: 0, no_signal: 0, disagreement_rate: 0, coverage: 1, status: "no_baseline", rerouted_agreements: 0, rerouted_disagreements: 0, rerouted_no_signal: 0, not_compared: 0 },

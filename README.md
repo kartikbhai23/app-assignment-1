@@ -181,8 +181,11 @@ The `prometheus` service (Prometheus 3.15.1, config in [`prometheus/prometheus.y
 | `gateway_model_disabled` | `model` | 1 while the controller has the model disabled |
 | `gateway_monitor_failure_rate`, `gateway_monitor_window_samples` | `model` | Failure rate and number of calls in the monitor window (rate is 0 when the window is empty) |
 | `gateway_controller_interventions_total` | `action`, `model` | Controller actions: `disabled`, `re-enabled`, `kept_last_backend` |
+| `gateway_jev_answered_calls_total` | `mocked` | Jev calls that returned an answer; each call counts once, not once per question |
+| `gateway_jev_tokens_total` | `direction`, `mocked` | Input and output tokens of answered Jev calls |
+| `gateway_jev_estimated_cost_usd_total` | `mocked` | Input tokens times `APP_JEV_INPUT_PRICE_PER_MILLION_USD`; absent while the price is unset, so an unknown price never reads as $0 |
 
-Labels only take values from fixed lists. Message text, replies and request IDs are never labels; a test checks this. All values are in memory and reset when the gateway restarts. A re-enable is counted when the gateway next checks the model (a request, `/v1/health` or a scrape), not at the exact end of the cooldown. With the mock backends, latency includes the simulated delay and says nothing about real model speed. There are no token, cost or quality metrics yet, and Prometheus does not scrape vLLM or a separate monitor because neither exists yet.
+Labels only take values from fixed lists. Message text, replies and request IDs are never labels; a test checks this. All values are in memory and reset when the gateway restarts. A re-enable is counted when the gateway next checks the model (a request, `/v1/health` or a scrape), not at the exact end of the cooldown. With the mock backends, latency includes the simulated delay and says nothing about real model speed. Jev tokens and estimated cost are counted since the gateway started; mock Jev reports 0 tokens. `/v1/health` has the same totals in `jev_usage`, and the Health screen shows them on the Jev card. There are no Qwen token or cost metrics yet, and Prometheus does not scrape vLLM or a separate monitor because neither runs with the gateway yet.
 
 To look at metrics without publishing a port:
 

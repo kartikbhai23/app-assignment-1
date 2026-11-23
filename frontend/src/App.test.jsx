@@ -164,6 +164,7 @@ describe("Health", () => {
 
     const jev = await screen.findByRole("region", { name: "Jev router" });
     expect(within(jev).getByText("Calling Jev")).toBeInTheDocument();
+    expect(within(jev).getByText("price not set")).toBeInTheDocument();
     expect(within(jev).getByText("0 of 5")).toBeInTheDocument();
     expect(within(jev).getByText("30 s")).toBeInTheDocument();
   });
@@ -341,6 +342,26 @@ describe("Semantic monitor", () => {
     await openHealth(degradedHealth);
 
     expect(screen.getByRole("status")).not.toHaveTextContent("last resort");
+  });
+
+  it("shows Jev tokens and the estimated cost", async () => {
+    const jev_usage = { mocked: false, answered_calls: 3, input_tokens: 6000, output_tokens: 21, estimated_cost_usd: 0.000252 };
+    await openHealth({ ...healthyHealth, jev_usage });
+
+    const jev = screen.getByRole("region", { name: "Jev router" });
+    expect(within(jev).getByText("6,000 in, 21 out (3 calls)")).toBeInTheDocument();
+    expect(within(jev).getByText("$0.0003")).toBeInTheDocument();
+    expect(within(jev).queryByText(/Mock Jev reports no tokens/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [0.0000168, "$0.0000168"], // 400 input tokens at $0.042 per million
+    [0.00001, "$0.0000100"],
+    [0, "$0"],
+  ])("never shows a nonzero cost as $0.0000 (%s)", async (cost, text) => {
+    const jev_usage = { mocked: false, answered_calls: 1, input_tokens: 400, output_tokens: 7, estimated_cost_usd: cost };
+    await openHealth({ ...healthyHealth, jev_usage });
+    expect(within(screen.getByRole("region", { name: "Jev router" })).getByText(text)).toBeInTheDocument();
   });
 
   it("says how many replies were not compared with Jev", async () => {
