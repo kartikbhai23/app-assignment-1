@@ -10,6 +10,47 @@ export const EXAMPLES = [
   "Tell me about the weather",
 ];
 const MAX_CHARS = 2000;
+const DRAFT_KEY = "gateway.chat.draft";
+const TURNS_KEY = "gateway.chat.turns";
+
+// The browser tab keeps the draft and the conversation so a page change or a
+// refresh does not lose them. Nothing here goes to the server. A tab that
+// blocks storage just starts empty.
+export function readSaved(key, fallback) {
+  try {
+    const raw = window.sessionStorage.getItem(key);
+    return raw === null ? fallback : JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
+export function writeSaved(key, value) {
+  try {
+    if (value === null || (Array.isArray(value) && value.length === 0) || value === "") {
+      window.sessionStorage.removeItem(key);
+    } else {
+      window.sessionStorage.setItem(key, JSON.stringify(value));
+    }
+  } catch {
+    // Storage is full or blocked: keep working without it.
+  }
+}
+
+export { DRAFT_KEY, TURNS_KEY };
+
+const TOPICS = [
+  "a card that has not arrived",
+  "a lost or stolen card",
+  "a transfer the recipient has not received",
+  "exchange rates",
+  "a failed top-up",
+  "a pending transfer",
+  "a card payment fee",
+  "verifying your identity",
+  "a refund that has not shown up",
+  "the wrong amount of cash received",
+];
 
 function detailRows(result) {
   const t = result.trace;
@@ -49,6 +90,9 @@ function Reply({ result }) {
               </ul>
             </div>
           )}
+          <p className="muted note">
+            Confidence is how sure the router was about its route choice. It does not say the reply is correct.
+          </p>
           <div className="table-scroll">
             <table className="kv">
               <tbody>
@@ -88,10 +132,14 @@ function Turn({ turn }) {
 }
 
 export default function ChatView({ turns, onSend }) {
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState(() => readSaved(DRAFT_KEY, ""));
   const endRef = useRef(null);
   const busy = turns.some((t) => t.status === "pending");
   const canSend = !busy && message.trim().length > 0;
+
+  useEffect(() => {
+    writeSaved(DRAFT_KEY, message);
+  }, [message]);
 
   useEffect(() => {
     if (turns.length) endRef.current?.scrollIntoView?.({ block: "end" });
@@ -112,6 +160,12 @@ export default function ChatView({ turns, onSend }) {
             <div className="empty">
               <h1>How can DemoBank help?</h1>
               <p className="muted">Ask a banking question. Each reply shows how the gateway handled it.</p>
+              <details className="topics">
+                <summary>What can I ask about?</summary>
+                <p className="muted">
+                  This demo knows about {TOPICS.join(", ")}. Anything else gets a "could not match" reply.
+                </p>
+              </details>
               <div className="examples">
                 {EXAMPLES.map((text) => (
                   <button key={text} type="button" className="example" onClick={() => submit(text)}>
@@ -119,6 +173,7 @@ export default function ChatView({ turns, onSend }) {
                   </button>
                 ))}
               </div>
+              <p className="muted note">The weather example is outside banking on purpose: it shows the fallback reply.</p>
             </div>
           )}
           {turns.map((turn) => (
@@ -167,8 +222,12 @@ export default function ChatView({ turns, onSend }) {
               </svg>
             </button>
           </div>
+          <p className={`counter${message.length >= MAX_CHARS ? " counter-full" : ""}`}>
+            {message.length} / {MAX_CHARS} characters
+          </p>
           <p className="footnote">
-            Fictional bank demo. Each message is routed on its own; the gateway keeps no conversation memory yet.
+            Fictional bank demo. Each message is routed on its own, so ask one question at a time; the gateway keeps no
+            conversation memory yet.
           </p>
         </div>
       </form>

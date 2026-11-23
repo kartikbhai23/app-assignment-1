@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { GatewayError, getHealth, sendChat } from "./api.js";
-import ChatView from "./components/ChatView.jsx";
+import ChatView, { TURNS_KEY, readSaved, writeSaved } from "./components/ChatView.jsx";
 import HealthView from "./components/HealthView.jsx";
 import Sidebar from "./components/Sidebar.jsx";
 
@@ -13,10 +13,19 @@ function viewFromHash() {
   return VIEWS.includes(view) ? view : "chat";
 }
 
+// A reply that was still pending when the page closed will never arrive.
+function restoreTurns() {
+  const saved = readSaved(TURNS_KEY, []);
+  if (!Array.isArray(saved)) return [];
+  return saved.map((t) =>
+    t.status === "pending" ? { ...t, status: "error", error: "This message was interrupted by a page refresh. Send it again." } : t,
+  );
+}
+
 export default function App() {
   const [view, setView] = useState(viewFromHash);
-  const [turns, setTurns] = useState([]);
-  const nextTurnId = useRef(0);
+  const [turns, setTurns] = useState(restoreTurns);
+  const nextTurnId = useRef(turns.reduce((max, t) => Math.max(max, t.id + 1), 0));
   const [health, setHealth] = useState(null);
   const [healthError, setHealthError] = useState(null);
 
@@ -49,6 +58,10 @@ export default function App() {
       clearInterval(timer);
     };
   }, []);
+
+  useEffect(() => {
+    writeSaved(TURNS_KEY, turns);
+  }, [turns]);
 
   const send = useCallback(async (message) => {
     // Turn IDs are local to this app session and also work over plain HTTP.
