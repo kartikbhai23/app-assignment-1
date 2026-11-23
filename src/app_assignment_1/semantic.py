@@ -14,12 +14,18 @@ Failed format checks and failed calls give no sample here; the failure monitor
 in monitor.py counts them. A model serving the other route's traffic sees
 different messages, so those samples are kept apart from its own window.
 
+A sample only means something when Jev and the model are alike: both mocks,
+which share one keyword matcher, or both real models. Real Jev answers over 78
+labels while the mock models know 10 intents, so comparing the two would show
+disagreements that say nothing about the model. Those replies are not scored;
+`not_compared` counts them.
+
 The windows live in the gateway process and reset on restart, like the failure
 monitor's. The rules follow the scoring table drafted in PR #45. The baseline,
 margin and coverage minimum are placeholders until they are set from dev data.
 """
 
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Iterable, Sequence
 from typing import Literal
 
@@ -63,6 +69,9 @@ class SemanticMonitor:
         self.rerouted: dict[BackendName, deque[Sample]] = {
             name: deque(maxlen=settings.semantic_window) for name in names
         }
+        # Replies not scored because Jev and the model are not alike, since
+        # the gateway started.
+        self.not_compared: Counter[BackendName] = Counter()
         self.rules = SemanticRules(
             window=settings.semantic_window,
             min_samples=settings.semantic_min_samples,
@@ -73,6 +82,10 @@ class SemanticMonitor:
 
     def record(self, name: BackendName, sample: Sample, rerouted: bool) -> None:
         (self.rerouted if rerouted else self.windows)[name].append(sample)
+
+    def skip(self, name: BackendName) -> None:
+        """Count a reply that cannot be compared with Jev's answer."""
+        self.not_compared[name] += 1
 
     def stats(self) -> list[SemanticStatus]:
         return [self._status(name) for name in self.windows]
@@ -120,4 +133,5 @@ class SemanticMonitor:
             rerouted_agreements=rerouted.count("agree"),
             rerouted_disagreements=rerouted.count("disagree"),
             rerouted_no_signal=rerouted.count("no_signal"),
+            not_compared=self.not_compared[name],
         )

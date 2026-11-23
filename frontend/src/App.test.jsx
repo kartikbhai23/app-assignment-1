@@ -292,6 +292,13 @@ describe("Semantic monitor", () => {
     expect(within(screen.getByRole("region", { name: "Jev router" })).getByText(text)).toBeInTheDocument();
   });
 
+  it("says how many replies were not compared with Jev", async () => {
+    const semantic = labelSwapHealth.semantic.map((m) => (m.name === "qwen3-1.7b" ? { ...m, not_compared: 7 } : m));
+    await openHealth({ ...labelSwapHealth, semantic });
+
+    expect(screen.getByText(/Not compared since the gateway started: 7 from qwen3-1.7b/)).toBeInTheDocument();
+  });
+
   it("shows low coverage instead of a healthy rate while Jev is down", async () => {
     const table = await openHealth(lowCoverageHealth);
 
