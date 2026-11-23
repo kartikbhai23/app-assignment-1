@@ -528,12 +528,18 @@ class Gateway:
         if not format_errors:
             # Score the model's own label against Jev's intent answer. A failed
             # format check gives no semantic sample; the controller counted it.
-            sample = score(generated.intent, jev)
-            rerouted = backend is not selected
-            self.semantic.record(backend.config.name, sample, rerouted)
-            self.metrics.semantic_samples.labels(
-                backend.config.name, sample, "rerouted" if rerouted else "own"
-            ).inc()
+            # Only like with like: a mock model against mock Jev, or a real
+            # model against real Jev. A mix disagrees by design.
+            if self.jev_mocked == getattr(backend, "mocked", True):
+                sample = score(generated.intent, jev)
+                rerouted = backend is not selected
+                self.semantic.record(backend.config.name, sample, rerouted)
+                self.metrics.semantic_samples.labels(
+                    backend.config.name, sample, "rerouted" if rerouted else "own"
+                ).inc()
+            else:
+                self.semantic.skip(backend.config.name)
+                self.metrics.semantic_not_compared.labels(backend.config.name).inc()
 
         response = ChatResponse(
             id=request_id,

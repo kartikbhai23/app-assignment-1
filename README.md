@@ -67,6 +67,7 @@ A model can return a well-formed reply for the wrong intent, which the format ch
   - `above_baseline`: the disagreement rate is above the baseline plus `APP_SEMANTIC_ALERT_MARGIN` (default 0.15).
   - `normal`: otherwise.
 - **Visibility:** `GET /v1/health` has `semantic` (per model: counts, `disagreement_rate`, `coverage`, `status`) and `semantic_rules`. `/metrics` has `gateway_semantic_samples_total`, `gateway_semantic_disagreement_rate`, `gateway_semantic_coverage` and `gateway_semantic_above_baseline`. The rate and coverage gauges are absent while a model has no data, so an empty window never reads as 0%.
+- **Like with like:** a reply is only compared when Jev and the model are both mocks or both real. Real Jev answers over 78 labels while the mock models know 10 intents, so a mix would disagree by design. Those replies are counted in `not_compared` in `/v1/health` and `gateway_semantic_not_compared_total`, and stay out of the windows.
 
 The semantic monitor only reports and takes no action. The **Health** screen shows it as a table, one row per model, and adds a red "Possible wrong intents" banner while a model is above the baseline. The defaults are placeholders: the baseline, margin and coverage minimum should be set from dev data before the final test. In mock mode, Jev and both models share one keyword classifier, so a healthy mock always agrees and its baseline is 0. A disagreement rate measured on mocks says nothing about real model quality. The windows reset when the gateway restarts.
 
