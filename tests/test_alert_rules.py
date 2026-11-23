@@ -12,6 +12,10 @@ from app_assignment_1.api import create_app
 from app_assignment_1.config import Settings
 
 RULES = Path("prometheus/alerts.yml")
+RUNBOOK = Path("docs/MONITORING.md")
+RUNBOOK_URL = (
+    "https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#"
+)
 SUFFIXES = ("_total", "_bucket", "_sum", "_count", "_created")
 
 
@@ -54,3 +58,18 @@ def test_prometheus_loads_the_rules_file():
     assert config["rule_files"] == ["alerts.yml"]
     compose = Path("compose.yml").read_text()
     assert "./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro" in compose
+
+
+def test_every_alert_links_to_its_runbook_section():
+    # GitHub turns the heading "### GatewayDown" into the anchor #gatewaydown.
+    alerts = [
+        rule["alert"]
+        for rule in yaml.safe_load(RULES.read_text())["groups"][0]["rules"]
+    ]
+    text = RUNBOOK.read_text()
+    alerts_part = text.split("\n## Alerts\n", 1)[1].split("\n## ", 1)[0]
+    headings = re.findall(r"^### (\S+)$", alerts_part, re.M)
+    assert headings == alerts
+    for rule in yaml.safe_load(RULES.read_text())["groups"][0]["rules"]:
+        url = rule["annotations"]["runbook_url"]
+        assert url == RUNBOOK_URL + rule["alert"].lower()

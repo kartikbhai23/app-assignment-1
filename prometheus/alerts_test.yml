@@ -26,6 +26,7 @@ tests:
               job: gateway
               instance: gateway:8000
             exp_annotations:
+              runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#gatewaydown
               summary: Prometheus cannot scrape the gateway
               description: The gateway's /metrics has not answered for 1 minute.
 
@@ -47,6 +48,7 @@ tests:
               severity: warning
               model: qwen3-1.7b
             exp_annotations:
+              runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#modeldisabledbycontroller
               summary: The controller disabled qwen3-1.7b
               description: >-
                 Its route's traffic goes to the other model until the cooldown
@@ -75,6 +77,7 @@ tests:
               severity: warning
               model: qwen3-1.7b
             exp_annotations:
+              runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#modelfailureraterising
               summary: qwen3-1.7b fails 30% of recent calls
               description: >-
                 Format failures plus failed calls in the monitor window. The
@@ -98,6 +101,7 @@ tests:
               severity: warning
               model: qwen3-1.7b
             exp_annotations:
+              runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#possiblewrongintents
               summary: qwen3-1.7b disagrees with Jev above the baseline
               description: >-
                 Its replies pass the format check but often name a different
@@ -121,6 +125,7 @@ tests:
           - exp_labels:
               severity: warning
             exp_annotations:
+              runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#chatrequestsfailing
               summary: Chat requests got a 503 in the last 5 minutes
               description: No model could answer them, or the request deadline ran out.
       - eval_time: 6m
@@ -132,6 +137,7 @@ tests:
           - exp_labels:
               severity: critical
             exp_annotations:
+              runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#chatmostlyfailing
               summary: 50% of chat requests get a 503
               description: More than 1 in 5 requests fail for 5 minutes.
 
@@ -155,6 +161,7 @@ tests:
           - exp_labels:
               severity: warning
             exp_annotations:
+              runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#jevmostlyskipped
               summary: Keyword rules route 75% of messages
               description: >-
                 Jev times out, errors, gives an invalid route, or its circuit
@@ -180,5 +187,6 @@ tests:
           - exp_labels:
               severity: warning
             exp_annotations:
+              runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#chatlatencyhigh
               summary: p95 chat latency is above 10 s
               description: The request deadline is 45 s by default.
