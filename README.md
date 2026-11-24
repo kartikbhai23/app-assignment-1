@@ -495,7 +495,7 @@ docker compose -f compose.gpu.yml --env-file env/gpu.env -p smart-gateway-gpu do
 
 ## Offline evaluation
 
-[`scripts/run_eval.py`](scripts/run_eval.py) measures intent accuracy on a fixed set of messages. The primary set is the official [Banking77](https://github.com/PolyAI-LDN/task-specific-datasets) test set (3,080 messages, 40 per intent; PolyAI, CC BY 4.0). The script downloads it at a pinned commit, checks its SHA-256 and caches it in `data/cache/`. `--dataset-csv` takes any CSV with `text` and `intent` columns instead, such as the fresh set once it exists.
+[`scripts/run_eval.py`](scripts/run_eval.py) measures intent accuracy on a fixed set of messages. The primary set is the official [Banking77](https://github.com/PolyAI-LDN/task-specific-datasets) test set (3,080 messages, 40 per intent; PolyAI, CC BY 4.0). The script downloads it at a pinned commit, checks its SHA-256 and caches it in `data/cache/`. `--dataset-csv` takes any CSV with `text` and `intent` columns instead, such as the fresh set once it exists. For a CSV that holds several splits in a `split` column, such as the Banking77 dev split, add `--split dev` to keep only those rows; results keep each row's number in the whole file.
 
 Targets:
 

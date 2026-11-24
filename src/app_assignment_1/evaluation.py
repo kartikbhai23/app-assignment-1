@@ -99,15 +99,25 @@ def parse_banking77(body: bytes, labels: LabelSet) -> list[Message]:
     return messages
 
 
-def parse_labelled_csv(body: bytes, labels: LabelSet) -> list[Message]:
+def parse_labelled_csv(
+    body: bytes, labels: LabelSet, split: str | None = None
+) -> list[Message]:
     """A CSV with `text` and `intent` columns, such as the fresh set.
 
     `intent` may be one of our labels or a Banking77 name. `out_of_scope`
     maps to `unknown`, as agreed for this release.
+
+    With `split`, the CSV also needs a `split` column, and only the rows with
+    that value are kept, such as `dev` from data/banking77_split.csv (#89),
+    which holds train and dev in one file. Rows keep their number in the whole
+    file, so a result still points at the right line.
     """
     by_name = {item.banking77_name: item.label for item in labels.items}
+    columns = ("text", "intent") + (("split",) if split is not None else ())
     messages = []
-    for row, record in _rows(body, ("text", "intent")):
+    for row, record in _rows(body, columns):
+        if split is not None and record["split"].strip() != split:
+            continue
         intent = record["intent"].strip()
         if intent == "out_of_scope":
             intent = UNKNOWN
@@ -115,6 +125,8 @@ def parse_labelled_csv(body: bytes, labels: LabelSet) -> list[Message]:
         if intent not in labels.names:
             raise ValueError(f"Row {row}: {intent!r} is not a label")
         messages.append(Message(row, record["text"], intent))
+    if split is not None and not messages:
+        raise ValueError(f"No rows have split {split!r}")
     return messages
 
 

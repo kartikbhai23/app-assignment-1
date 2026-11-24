@@ -368,3 +368,38 @@ def test_gateway_error_statuses(status, code, final):
         final,
         None,
     )
+
+
+def test_labelled_csv_keeps_one_split_with_file_row_numbers():
+    body = (
+        b"text,intent,split,source_row\n"
+        b"a,card_arrival,train,0\n"
+        b"b,age_limit,dev,1\n"
+        b"c,atm_support,dev,2\n"
+    )
+    messages = parse_labelled_csv(body, LABELS, split="dev")
+    assert [(m.row, m.gold) for m in messages] == [(1, "age_limit"), (2, "atm_support")]
+    assert len(parse_labelled_csv(body, LABELS)) == 3  # no --split: every row
+    with pytest.raises(ValueError, match="no split column"):
+        parse_labelled_csv(b"text,intent\na,card_arrival\n", LABELS, split="dev")
+    with pytest.raises(ValueError, match="No rows have split 'test'"):
+        parse_labelled_csv(body, LABELS, split="test")
+
+
+def test_runner_split_is_part_of_the_run(tmp_path):
+    run_eval = load_script()
+    data = tmp_path / "banking77_split.csv"
+    data.write_text("text,intent,split\nm0,card_arrival,train\nm1,age_limit,dev\n")
+    out = tmp_path / "dev.jsonl"
+    args = ["run", "--target", "small", "--mock", "--dataset-csv", str(data),
+            "--out", str(out)]  # fmt: skip
+    assert run_eval.main([*args, "--split", "dev"]) == 0
+    header, items = run_eval.read_results(out)
+    assert header["dataset"] == "banking77_split:dev" and header["dataset_size"] == 1
+    assert [i["row"] for i in items] == [1]
+    # The same file without --split is a different run, not a resume.
+    with pytest.raises(SystemExit, match="different run"):
+        run_eval.main(args)
+    with pytest.raises(SystemExit):
+        run_eval.main(["run", "--target", "small", "--mock", "--split", "dev",
+                       "--out", str(out)])  # fmt: skip

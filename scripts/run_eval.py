@@ -16,7 +16,8 @@
 Datasets: `--dataset banking77-test` (the default) is the official Banking77
 test set, 3,080 messages, downloaded at a pinned commit and checked against its
 SHA-256, then cached in data/cache/ (ignored by git). `--dataset-csv PATH` is any
-CSV with `text` and `intent` columns, such as the fresh set.
+CSV with `text` and `intent` columns, such as the fresh set. Add `--split dev`
+for a CSV with a `split` column, such as the dev split, to keep only those rows.
 
 Results are JSONL: one `run` line with the settings, then one `item` line per
 message, keyed by its row in the dataset. They hold no message text and no
@@ -107,9 +108,14 @@ def banking77_test(labels: LabelSet, cache: Path = ROOT / CACHE_DIR) -> Dataset:
     return Dataset("banking77-test", expected, tuple(parse_banking77(body, labels)))
 
 
-def csv_dataset(path: Path, labels: LabelSet) -> Dataset:
+def csv_dataset(path: Path, labels: LabelSet, split: str | None = None) -> Dataset:
     body = path.read_bytes()
-    return Dataset(path.stem, sha256(body), tuple(parse_labelled_csv(body, labels)))
+    try:
+        messages = parse_labelled_csv(body, labels, split)
+    except ValueError as exc:
+        raise SystemExit(f"{path}: {exc}") from None
+    name = path.stem if split is None else f"{path.stem}:{split}"
+    return Dataset(name, sha256(body), tuple(messages))
 
 
 def git_commit() -> str:
@@ -261,7 +267,7 @@ async def run_items(
 async def run(args: argparse.Namespace) -> int:
     labels, cards, backends = load_config()
     dataset = (
-        csv_dataset(args.dataset_csv, labels)
+        csv_dataset(args.dataset_csv, labels, args.split)
         if args.dataset_csv
         else banking77_test(labels)
     )
@@ -322,7 +328,14 @@ async def run(args: argparse.Namespace) -> int:
     done_rows: set[int] = set()
     if out.exists():
         old, items = read_results(out)
-        keys = ("dataset_sha256", "target", "model", "mocked", "option_set_version")
+        keys = (
+            "dataset",
+            "dataset_sha256",
+            "target",
+            "model",
+            "mocked",
+            "option_set_version",
+        )
         if any(old.get(key) != header[key] for key in keys):
             raise SystemExit(
                 f"{out} holds a different run; use another --out to start a new one"
@@ -421,7 +434,7 @@ def cmd_oracle(args: argparse.Namespace) -> int:
     large_header, large = read_results(args.large)
     if (small_header["target"], large_header["target"]) != ("small", "large"):
         raise SystemExit("Pass the small results first, then the large results")
-    for key in ("dataset_sha256", "option_set_version", "mocked"):
+    for key in ("dataset", "dataset_sha256", "option_set_version", "mocked"):
         if small_header.get(key) != large_header.get(key):
             raise SystemExit(f"The two results differ in {key}")
     combined = oracle(small, large)
@@ -462,6 +475,9 @@ def main(argv: list[str] | None = None) -> int:
         "--dataset", choices=("banking77-test",), default="banking77-test"
     )
     data.add_argument("--dataset-csv", type=Path, help="CSV with text,intent")
+    p.add_argument(
+        "--split", help="with --dataset-csv: only rows whose split column is this"
+    )
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--base-url", help="vLLM server, or the gateway's public proxy")
     p.add_argument("--mock", action="store_true", help="use the mock model")
@@ -480,6 +496,8 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "run":
+        if args.split and not args.dataset_csv:
+            parser.error("--split needs --dataset-csv")
         if args.target == "gateway":
             args.base_url = args.base_url or "http://127.0.0.1:8080"
             if args.mock:
