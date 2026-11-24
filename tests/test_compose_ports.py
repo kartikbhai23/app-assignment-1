@@ -32,6 +32,14 @@ def test_vllm_ports_bind_only_to_the_private_ip():
             )
 
 
+def test_vllm_requires_an_api_key():
+    for name, svc in _services("compose.gpu.yml").items():
+        key = svc["environment"]["VLLM_API_KEY"]
+        # Required: an unset or empty key stops Compose instead of serving open.
+        assert key.startswith("${VLLM_API_KEY:?"), (name, key)
+        assert not any(arg.startswith("--api-key") for arg in svc["command"]), name
+
+
 def test_vllm_names_match_backend_config():
     names = {b["name"] for b in json.loads((ROOT / "config/backends.json").read_text())}
     served = {

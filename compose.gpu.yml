@@ -8,6 +8,16 @@
 # Compose refuses to start without VLLM_BIND_IP instead of binding to 0.0.0.0.
 # The security group must also allow 8001-8002 from the CPU instance only.
 #
+# Every /v1 request also needs the key VLLM_API_KEY from env/gpu.env, sent as
+# "Authorization: Bearer <key>". Compose refuses to start without it. vLLM
+# reads it from the environment, so it is not on the process command line.
+# /health and /metrics stay open (vLLM guards only /v1), so the healthcheck and
+# a Prometheus scrape need no key. The network rules stay the main protection;
+# the key covers a security group that gets loosened by mistake.
+#
+# HF_HUB_OFFLINE: set it to 1 in env/gpu.env after the first download, so later
+# starts load from MODEL_CACHE_DIR without contacting Hugging Face.
+#
 # The Hugging Face cache (weights and tokenizers, about 12 GB) lives in a host
 # directory, MODEL_CACHE_DIR in env/gpu.env, also required. On Jetstream2 use
 # an attached volume such as /media/volume/gpu-models: the vLLM image alone
@@ -28,7 +38,15 @@
 # point. 0.33 (6.6 GiB) + 0.54 (10.8 GiB) = 17.4 GiB fits in 17.84; the
 # earlier 0.35 + 0.55 (18.0 GiB) did not, and vllm-large failed to start.
 # Measured for vllm-small at 0.35: weights 3.22 GiB, peak activation 0.66,
-# CUDA graphs 0.05, KV cache 3.04; at 0.33 the KV cache is about 2.6 GiB.
+# CUDA graphs 0.05, KV cache 3.04. Measured at 0.33 + 0.54 (2026-11-23): KV
+# cache 3.15 GiB small and 3.01 GiB large (21,872 tokens); nvidia-smi showed
+# 18,630 of 20,480 MiB used.
+#
+# The margin is tiny: vllm-large started with 10.82 GiB free against the
+# 10.8 GiB it asks for. depends_on orders only the first start. If one
+# container restarts on its own while the other runs, its memory check may
+# fail. Restart both together (down, then up) rather than one at a time. If
+# vllm-large keeps failing its check, lower vllm-small to 0.32 (not tested).
 # On a GPU without this reservation there is room to raise both shares.
 # --max-num-seqs 8 (default 256) keeps activation and CUDA-graph memory small,
 # which leaves more for the KV cache; a demo never runs 8 requests at once
@@ -38,6 +56,9 @@
 
 x-vllm: &vllm
   image: vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
+  environment:
+    VLLM_API_KEY: "${VLLM_API_KEY:?set VLLM_API_KEY in env/gpu.env (openssl rand -hex 32)}"
+    HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-0}"
   volumes:
     - "${MODEL_CACHE_DIR:?set MODEL_CACHE_DIR in env/gpu.env to the model directory}:/root/.cache/huggingface"
   ipc: host
@@ -55,6 +76,8 @@ x-vllm: &vllm
     retries: 5
     # The first start downloads the weights into MODEL_CACHE_DIR.
     start_period: 900s
+  # Containers did not come back after the instance was shelved and
+  # unshelved; rerun `up -d --wait` after an unshelve.
   restart: unless-stopped
 
 services:

@@ -164,18 +164,18 @@ components:
     tag: ":8001"
     owner: "Yanzhen · Pavlos: serving"
     items:
-      - built: vLLM v0.33.0; JSON smoke test passes
+      - built: vLLM v0.33.0; smoke test via SSH tunnel
       - simulated: Gateway uses a keyword mock
-      - todo: Test from CPU instance; Prometheus
+      - todo: Smoke test from CPU instance
 
   vllm_large:
     title: vllm-large · Qwen3-4B
     tag: ":8002"
     owner: "Yanzhen · Pavlos: serving"
     items:
-      - built: vLLM v0.33.0; JSON smoke test passes
+      - built: vLLM v0.33.0; smoke test via SSH tunnel
       - simulated: Gateway uses a keyword mock
-      - todo: Test from CPU instance; Prometheus
+      - todo: Smoke test from CPU instance
 
   model_volume:
     title: Model volume

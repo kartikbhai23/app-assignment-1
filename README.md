@@ -244,6 +244,7 @@ Pydantic Settings reads `.env` then `env/.env` in native local runs. Process env
 | `APP_OPERATOR_TOKEN` | unset | Bearer token for the operator routes, at least 16 characters; unset turns them off (403). Set it only in `env/.env` |
 | `APP_VLLM_SMALL_BASE_URL` | unset | Qwen3-1.7B server on the GPU host's private IP, for example `http://10.0.12.34:8001` (not used yet) |
 | `APP_VLLM_LARGE_BASE_URL` | unset | Qwen3-4B server on the GPU host's private IP, for example `http://10.0.12.34:8002` (not used yet) |
+| `APP_VLLM_API_KEY` | unset | The key both vLLM servers require (`VLLM_API_KEY` in `env/gpu.env`). Set it only in `env/.env` (not used yet) |
 | `APP_REQUEST_DEADLINE_SECONDS` | `45` | Total time for one chat request, including the Jev call. A first attempt that runs out of time counts as a failed call; an alternate cut short gives a 503 with `deadline_exceeded` |
 | `APP_ALTERNATE_RESERVE_SECONDS` | `15` | Part of the deadline held back from the first attempt for the other backend, only when the other backend is usable; with the Jev timeout, must stay below the deadline |
 
@@ -432,6 +433,8 @@ Both run vLLM `v0.33.0` (image pinned by digest) with `--max-model-len 4096` on 
 
 **Network.** vLLM is reachable only from the CPU instance, over the Jetstream2 private network. Each server binds to the GPU host's private IP (`VLLM_BIND_IP`), and Compose will not start without it. Do not bind to `0.0.0.0` or the public IP. Do not open 8001–8002 to the internet.
 
+**API key.** Every `/v1` request must also send `Authorization: Bearer <key>`, with the key from `VLLM_API_KEY` in `env/gpu.env`. Compose will not start without it. The network rules stay the main protection; the key covers a security group that gets loosened by mistake. `/health` and `/metrics` need no key. The gateway will read the same value from `APP_VLLM_API_KEY` once the backends are wired in.
+
 **Allocate the instance** (once):
 
 1. Create a GPU instance in the same project and private network as the CPU instance. Pick a GPU with at least 20 GB of memory: the two models' bf16 weights are about 12 GB together, and the rest goes to KV cache. The settings in `compose.gpu.yml` are sized for the GRID A100X-20C vGPU, where about 2.16 GiB of the 20 GiB is reserved and not shown by `nvidia-smi`. The vLLM image alone takes about 37 GB of the root disk, so attach a separate Jetstream2 volume (50 GB is plenty) for the model weights, for example at `/media/volume/gpu-models`.
@@ -445,6 +448,7 @@ git clone --branch main --single-branch \
   https://github.com/sv642-hub/app-assignment-1.git smart-ai-gateway-prototype
 cd smart-ai-gateway-prototype
 cp env/gpu.env.example env/gpu.env   # set VLLM_BIND_IP (ip -4 addr) and MODEL_CACHE_DIR (the attached volume)
+sed -i "s/^VLLM_API_KEY=$/VLLM_API_KEY=$(openssl rand -hex 32)/" env/gpu.env
 docker compose -f compose.gpu.yml --env-file env/gpu.env -p smart-gateway-gpu up -d --wait
 docker compose -f compose.gpu.yml --env-file env/gpu.env -p smart-gateway-gpu ps
 nvidia-smi
@@ -452,9 +456,15 @@ nvidia-smi
 
 The first start downloads both models (about 12 GB) into `MODEL_CACHE_DIR`, which can take several minutes. `vllm-large` starts only after `vllm-small` is healthy. If `vllm-small` runs out of GPU memory, add `--enforce-eager` to it, or adjust `--gpu-memory-utilization` (0.33 and 0.54; together they must fit in the memory CUDA reports free, not the full 20 GiB), in `compose.gpu.yml` through a pull request.
 
-**Check from the CPU instance**, in a checkout with `uv sync --extra dev --frozen`:
+After the first download, set `HF_HUB_OFFLINE=1` in `env/gpu.env` so later starts never contact Hugging Face.
+
+The memory margin is tiny: `vllm-large` starts with about 0.02 GiB to spare. If one container restarts while the other is running, its memory check can fail. Restart both together with `down` and then `up -d --wait`, not one at a time. The containers also do not come back by themselves after the instance is shelved and unshelved; run the same `up -d --wait` command.
+
+**Check from the CPU instance**, in a checkout with `uv sync --extra dev --frozen`. Copy the key from `env/gpu.env` on the GPU host; do not save it in shell history files or the repo:
 
 ```bash
+read -rs VLLM_API_KEY && export VLLM_API_KEY   # paste the key, then Enter
+curl -fsS -H "Authorization: Bearer $VLLM_API_KEY" http://GPU_PRIVATE_IP:8001/v1/models
 uv run python scripts/smoke_vllm.py --route standard --base-url http://GPU_PRIVATE_IP:8001 --model qwen3-1.7b
 uv run python scripts/smoke_vllm.py --route complex  --base-url http://GPU_PRIVATE_IP:8002 --model qwen3-4b
 ```

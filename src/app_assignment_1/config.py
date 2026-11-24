@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     # example http://10.0.12.34:8001. Unset until the backends are wired in.
     vllm_small_base_url: AnyHttpUrl | None = None
     vllm_large_base_url: AnyHttpUrl | None = None
+    # The key both vLLM servers require (VLLM_API_KEY in env/gpu.env), sent as a
+    # bearer token. Server-side secret: set it only in the real env file.
+    vllm_api_key: SecretStr | None = None
     request_deadline_seconds: float = Field(default=45, gt=0, le=600)
     alternate_reserve_seconds: float = Field(default=15, gt=0, le=600)
 

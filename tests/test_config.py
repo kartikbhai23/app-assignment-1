@@ -64,3 +64,11 @@ def test_vllm_urls_from_env(monkeypatch):
 def test_vllm_url_must_be_a_url():
     with pytest.raises(ValidationError):
         Settings(_env_file=None, vllm_small_base_url="not a url")
+
+
+def test_vllm_api_key_is_secret(monkeypatch):
+    monkeypatch.setenv("APP_VLLM_API_KEY", "k" * 64)
+    settings = Settings(_env_file=None)
+    assert settings.vllm_api_key is not None
+    assert settings.vllm_api_key.get_secret_value() == "k" * 64
+    assert "k" * 64 not in repr(settings)
