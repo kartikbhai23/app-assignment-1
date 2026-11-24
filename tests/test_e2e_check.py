@@ -1,0 +1,94 @@
+"""The end-to-end check script passes on the mocks and fails on a broken backend."""
+
+import ast
+import importlib.util
+import json
+from pathlib import Path
+from urllib.error import HTTPError
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app_assignment_1.api import create_app
+from app_assignment_1.config import Settings
+
+SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "e2e_check.py"
+
+
+@pytest.fixture
+def e2e():
+    spec = importlib.util.spec_from_file_location("e2e_check", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def settings_for(tmp_path, **changes):
+    backends = json.loads(Path("config/backends.json").read_text())
+    for backend in backends:
+        backend["latency_ms"] = 0
+        backend.update(changes)
+    path = tmp_path / "backends.json"
+    path.write_text(json.dumps(backends))
+    return Settings(_env_file=None, backends_path=path)
+
+
+def serve(e2e, monkeypatch, client):
+    def get_json(base, path, payload=None, timeout=90):
+        response = (
+            client.get(path) if payload is None else client.post(path, json=payload)
+        )
+        if response.status_code >= 400:
+            raise HTTPError(path, response.status_code, "error", {}, None)
+        return response.json()
+
+    monkeypatch.setattr(e2e, "get_json", get_json)
+
+
+def test_script_is_python_39_syntax():
+    ast.parse(SCRIPT.read_text(), feature_version=(3, 9))
+
+
+def test_passes_on_mocks(e2e, monkeypatch, tmp_path, capsys):
+    with TestClient(create_app(settings_for(tmp_path))) as client:
+        serve(e2e, monkeypatch, client)
+        results = e2e.run("http://test")
+    out = capsys.readouterr().out
+    assert results.failed == 0, out
+    assert "MOCK Qwen" in out
+    assert "SKIP: Prometheus counters" in out
+    # The script never prints the fixed test messages either.
+    assert all(message not in out for message, _, _ in e2e.MESSAGES)
+
+
+def test_fails_when_replies_are_corrupted(e2e, monkeypatch, tmp_path):
+    with TestClient(create_app(settings_for(tmp_path, fault_rate=1))) as client:
+        serve(e2e, monkeypatch, client)
+        results = e2e.run("http://test")
+    assert results.failed > 0
+
+
+def test_parse_metrics_sums_labels_and_drops_total_suffix(e2e):
+    totals, series = e2e.parse_metrics(
+        "# TYPE x counter\n"
+        'gateway_chat_requests_total{route="a"} 2.0\n'
+        'gateway_chat_requests_total{route="b"} 3.0\n'
+    )
+    assert totals["gateway_chat_requests"] == 5.0
+    assert ("gateway_chat_requests", '{route="a"}') in series
+
+
+def test_metrics_command_deltas(e2e, monkeypatch, tmp_path, capsys):
+    with TestClient(create_app(settings_for(tmp_path))) as client:
+        serve(e2e, monkeypatch, client)
+        metrics = client.get("/metrics").text
+        monkeypatch.setattr(
+            e2e,
+            "read_metrics",
+            lambda url, cmd: e2e.parse_metrics(client.get("/metrics").text),
+        )
+        results = e2e.run("http://test", metrics_cmd="unused")
+    out = capsys.readouterr().out
+    assert metrics
+    assert results.failed == 0, out
+    assert "Prometheus: gateway_chat_requests rose by 7 (sent 7)" in out
