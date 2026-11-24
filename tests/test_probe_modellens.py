@@ -10,22 +10,15 @@ from app_assignment_1.probe import (
     ProbeExample,
     train_probe,
 )
-from app_assignment_1.probe_modellens import ModelLensExtractor, pool
+from app_assignment_1.probe_modellens import ModelLensExtractor
 
 
-class FakeTensor:
-    def __init__(self, rows):
-        self.rows = rows
-
-    def __getitem__(self, index):
-        assert index == 0
-        return self
-
-    def float(self):
-        return self
+class FakeVector:
+    def __init__(self, values):
+        self.values = values
 
     def tolist(self):
-        return self.rows
+        return self.values
 
 
 class FakeTokens:
@@ -52,33 +45,28 @@ class FakeTokenizer:
 
 
 class FakeLens:
-    """Returns one row per character, so the reply changes the activations."""
+    """Pools like ModelLens: one row per character, so the reply matters."""
 
     def __init__(self, layers=28):
-        self.names = {f"model.layers.{i}" for i in range(layers)}
-        self.attached = []
-        self.last = None
+        self.names = [f"model.layers.{i}" for i in range(layers)]
         self.ran = None
 
-    def attach_layers(self, names):
-        for name in names:
-            if name not in self.names:
-                raise ValueError(f"Layer '{name}' not found.")
-        self.attached = names
-        return self
+    def layer_names(self):
+        return self.names
 
-    def run(self, tokens):
+    def probe_features(self, tokens, layer_name, pooling):
         self.ran = tokens
-        self.last = FakeTensor([[float(ord(c)), 1.0] for c in tokens.text])
+        rows = [[float(ord(c)), 1.0] for c in tokens.text]
+        if pooling == "last":
+            vector = rows[-1]
+        else:
+            vector = [sum(col) / len(rows) for col in zip(*rows, strict=True)]
+        return {layer_name: [FakeVector(vector)]}
 
-    def get_layer_activation(self, name):
-        return self.last if name in self.attached else None
 
-
-def test_extractor_attaches_the_named_layer():
-    lens = FakeLens()
-    extractor = ModelLensExtractor(lens, FakeTokenizer(), layer=14)
-    assert lens.attached == ["model.layers.14"]
+def test_extractor_reads_the_named_layer():
+    extractor = ModelLensExtractor(FakeLens(), FakeTokenizer(), layer=14)
+    assert extractor.layer_name == "model.layers.14"
     assert extractor.mocked is False
 
 
@@ -125,21 +113,14 @@ def test_tokens_move_to_the_device():
     assert lens.ran.device == "cuda"
 
 
-def test_missing_activation_raises():
+def test_non_finite_activations_raise():
     lens = FakeLens()
+    lens.probe_features = lambda tokens, name, pooling: {
+        name: [FakeVector([float("nan")])]
+    }
     extractor = ModelLensExtractor(lens, FakeTokenizer(), layer=0)
-    lens.attached = []
-    with pytest.raises(RuntimeError, match="No activation"):
-        extractor.extract("q", "a")
-
-
-def test_pool_rejects_empty_and_non_finite():
-    with pytest.raises(ValueError, match="No tokens"):
-        pool([], "last")
     with pytest.raises(ValueError, match="finite"):
-        pool([[float("nan")]], "mean")
-    with pytest.raises(ValueError, match="pooling"):
-        pool([[1.0]], "max")  # type: ignore[arg-type]
+        extractor.extract("q", "a")
 
 
 def test_features_train_a_probe():

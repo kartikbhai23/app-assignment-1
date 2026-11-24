@@ -79,7 +79,7 @@ probe = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "modellens", extras = ["viz"], marker = "extra == 'probe'", git = "https://github.com/sv642-hub/DSAN-6600-ModelLens?rev=2c01850b25ab51b94d0d67d2039372bd6f93abc5" },
+    { name = "modellens", extras = ["viz"], marker = "extra == 'probe'", git = "https://github.com/sv642-hub/DSAN-6600-ModelLens?rev=587009edd77f8798a522093576a0d656a604b427" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.7" },
     { name = "prometheus-client", specifier = ">=0.26.0" },
@@ -1425,7 +1425,7 @@ wheels = [
 [[package]]
 name = "modellens"
 version = "0.1.0"
-source = { git = "https://github.com/sv642-hub/DSAN-6600-ModelLens?rev=2c01850b25ab51b94d0d67d2039372bd6f93abc5#2c01850b25ab51b94d0d67d2039372bd6f93abc5" }
+source = { git = "https://github.com/sv642-hub/DSAN-6600-ModelLens?rev=587009edd77f8798a522093576a0d656a604b427#587009edd77f8798a522093576a0d656a604b427" }
 dependencies = [
     { name = "torch" },
     { name = "transformers" },

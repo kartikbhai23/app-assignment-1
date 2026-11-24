@@ -1,10 +1,10 @@
 """Real activation extractor for the offline probe, built on ModelLens.
 
 ModelLens (https://github.com/sv642-hub/DSAN-6600-ModelLens) wraps a
-HuggingFace model and captures layer outputs with forward hooks. This module
-uses it to read one decoder layer of Qwen3-1.7B and pool it into the single
-vector that `ActivationExtractor` returns, so `train_probe` and `run_gate` in
-`probe.py` work on real activations.
+HuggingFace model and captures layer outputs with forward hooks. Its
+`probe_features` reads one decoder layer of Qwen3-1.7B and pools it into one
+vector. This module only adapts that to `ActivationExtractor`, so
+`train_probe` and `run_gate` in `probe.py` work on real activations.
 
 ModelLens, torch and transformers are in the optional `probe` extra and are
 imported only by `ModelLensExtractor.from_pretrained`, so the gateway and the
@@ -13,7 +13,6 @@ test suite never load them. Nothing here runs in the gateway.
 
 import importlib
 import math
-from collections.abc import Sequence
 from typing import Any, Literal, get_args
 
 Pooling = Literal["last", "mean"]
@@ -36,10 +35,10 @@ class ModelLensExtractor:
     `lens` is a `modellens.ModelLens` around a causal language model and
     `tokenizer` its HuggingFace tokenizer. Use `from_pretrained` to build both.
 
-    Pooling `last` keeps the final token of the formatted prompt and reply,
-    and `mean` averages over all tokens. docs/PROBE.md proposes the last
-    intent-label token as the primary position; that needs the reply's token
-    offsets and is still to build.
+    Pooling is done by ModelLens: `last` keeps the final token of the
+    formatted prompt and reply, and `mean` averages over all tokens.
+    docs/PROBE.md proposes the last intent-label token as the primary
+    position; that needs the reply's token offsets and is still to build.
     """
 
     mocked = False
@@ -62,8 +61,8 @@ class ModelLensExtractor:
         self.pooling: Pooling = pooling
         self.device = device
         self.layer_name = LAYER_NAME.format(layer=layer)
-        # Raises ValueError if the model has no layer with this name.
-        lens.attach_layers([self.layer_name])
+        if self.layer_name not in lens.layer_names():
+            raise ValueError(f"Layer '{self.layer_name}' not found.")
 
     @classmethod
     def from_pretrained(
@@ -109,25 +108,9 @@ class ModelLensExtractor:
         tokens = self.tokenizer(self.format_text(prompt, reply), return_tensors="pt")
         if self.device is not None:
             tokens = tokens.to(self.device)
-        self.lens.run(tokens)
-        activation = self.lens.get_layer_activation(self.layer_name)
-        if activation is None:
-            raise RuntimeError(f"No activation captured for {self.layer_name}.")
-        # Batch of one: shape [1, tokens, hidden].
-        rows: list[list[float]] = activation[0].float().tolist()
-        return pool(rows, self.pooling)
-
-
-def pool(rows: Sequence[Sequence[float]], pooling: Pooling) -> list[float]:
-    """Reduce per-token vectors to one vector."""
-    if not rows:
-        raise ValueError("No tokens to pool.")
-    if pooling == "last":
-        vector = list(rows[-1])
-    elif pooling == "mean":
-        vector = [sum(column) / len(rows) for column in zip(*rows, strict=True)]
-    else:
-        raise ValueError(f"pooling must be one of {POOLINGS}.")
-    if not all(math.isfinite(value) for value in vector):
-        raise ValueError("Activations must be finite numbers.")
-    return vector
+        features = self.lens.probe_features(tokens, self.layer_name, self.pooling)
+        # Batch of one: shape [1, hidden].
+        vector: list[float] = features[self.layer_name][0].tolist()
+        if not all(math.isfinite(value) for value in vector):
+            raise ValueError("Activations must be finite numbers.")
+        return vector

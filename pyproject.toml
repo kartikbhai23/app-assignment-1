@@ -35,7 +35,7 @@ dev = [
 # Qwen3-1.7B activations. Kept out of the gateway image; see docs/PROBE.md.
 # Install with `uv sync --extra dev --extra probe`.
 probe = [
-    "modellens[viz] @ git+https://github.com/sv642-hub/DSAN-6600-ModelLens@2c01850b25ab51b94d0d67d2039372bd6f93abc5",
+    "modellens[viz] @ git+https://github.com/sv642-hub/DSAN-6600-ModelLens@587009edd77f8798a522093576a0d656a604b427",
 ]
 
 # Build backend
