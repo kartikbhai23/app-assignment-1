@@ -2,7 +2,7 @@
 
 A live run of the three simulated faults on one stack, with no restarts between them. For each fault the script shows the monitor noticing, the controller disabling the small model (`qwen3-1.7b`), traffic moving to `qwen3-4b`, and the small model coming back after the cooldown.
 
-Everything here uses the mock backends. It shows that the loop reacts; it says nothing about how real Qwen models fail. Do not run it on the deployment testers use: it replaces the running stack and resets its history, and it turns on the operator routes with a public token.
+Everything here uses the mock backends. It shows that the loop reacts; it says nothing about how real Qwen models fail. The gateway refuses to start with the public demo token when `APP_ENVIRONMENT` is `staging` or `production`. Do not run it on the deployment testers use: it replaces the running stack and resets its history, and it turns on the operator routes with a public token.
 
 ## Before the demo
 

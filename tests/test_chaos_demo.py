@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app_assignment_1.api import create_app
-from app_assignment_1.config import Settings
+from app_assignment_1.config import PUBLIC_DEMO_OPERATOR_TOKEN, Settings
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "chaos_demo.py"
 spec = importlib.util.spec_from_file_location("chaos_demo", SCRIPT)
@@ -153,6 +153,26 @@ def test_scenario_names_match_the_fault_kinds() -> None:
         "outage",
         "label_swap",
     }
+
+
+def test_public_demo_token_is_refused_outside_local() -> None:
+    assert demo.DEMO_TOKEN == PUBLIC_DEMO_OPERATOR_TOKEN
+    for environment in ("staging", "production"):
+        with pytest.raises(ValueError, match="public token"):
+            Settings(
+                _env_file=None,
+                environment=environment,
+                operator_token=PUBLIC_DEMO_OPERATOR_TOKEN,
+            )
+    Settings(_env_file=None, operator_token=PUBLIC_DEMO_OPERATOR_TOKEN)
+
+
+def test_script_parses_on_python_3_9() -> None:
+    import ast
+
+    source = SCRIPT.read_text()
+    ast.parse(source, feature_version=(3, 9))
+    assert "from __future__ import annotations" in source
 
 
 def test_demo_override_matches_the_token() -> None:

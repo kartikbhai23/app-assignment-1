@@ -9,6 +9,8 @@ times it measured in this run. It sends only the fixed example messages below
 and never prints or stores anything else.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os

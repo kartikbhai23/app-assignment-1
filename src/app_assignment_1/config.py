@@ -11,6 +11,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # The throwaway password in env/compose.defaults.env. It is public, so a
 # staging or production gateway refuses to start with it.
 PUBLIC_DATABASE_PASSWORD = "smoke-test-only-not-for-deployment"
+# The operator token in compose.demo.yml; it is public.
+PUBLIC_DEMO_OPERATOR_TOKEN = "chaos-demo-token-not-for-deployment"
 
 
 class Settings(BaseSettings):
@@ -121,6 +123,11 @@ class Settings(BaseSettings):
             self.operator_token = None
         elif len(value) < 16:
             raise ValueError("APP_OPERATOR_TOKEN must be at least 16 characters")
+        elif self.environment != "local" and value == PUBLIC_DEMO_OPERATOR_TOKEN:
+            raise ValueError(
+                "APP_OPERATOR_TOKEN is the public token from compose.demo.yml; "
+                "set your own in env/.env"
+            )
         else:
             self.operator_token = SecretStr(value)
         return self
