@@ -91,4 +91,43 @@ def test_metrics_command_deltas(e2e, monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert metrics
     assert results.failed == 0, out
-    assert "Prometheus: gateway_chat_requests rose by 7 (sent 7)" in out
+    assert "Prometheus: gateway_chat_requests rose by 7 (sent 7;" in out
+
+
+def test_outage_fails_even_when_run_is_labelled_real(e2e, monkeypatch, tmp_path):
+    settings = settings_for(tmp_path)
+    backends = json.loads(settings.backends_path.read_text())
+    backends[0]["error_rate"] = 1
+    settings.backends_path.write_text(json.dumps(backends))
+    with TestClient(create_app(settings)) as client:
+        serve(e2e, monkeypatch, client)
+        plain = e2e.get_json
+
+        def as_real(base, path, payload=None, timeout=90):
+            body = plain(base, path, payload, timeout)
+            if path == "/v1/health":
+                body["mode"] = "real"
+            return body
+
+        monkeypatch.setattr(e2e, "get_json", as_real)
+        results = e2e.run("http://test")
+    assert results.failed > 0
+
+
+def test_failed_final_metrics_scrape_is_reported_not_raised(
+    e2e, monkeypatch, tmp_path, capsys
+):
+    calls = []
+
+    def read_metrics(url, cmd):
+        calls.append(1)
+        if len(calls) > 1:
+            raise OSError("metrics command exited 1")
+        return e2e.parse_metrics("")
+
+    with TestClient(create_app(settings_for(tmp_path))) as client:
+        serve(e2e, monkeypatch, client)
+        monkeypatch.setattr(e2e, "read_metrics", read_metrics)
+        results = e2e.run("http://test", metrics_cmd="unused")
+    assert results.failed == 1
+    assert "metrics source reachable at the end" in capsys.readouterr().out

@@ -152,7 +152,6 @@ def run(base, metrics_url=None, metrics_cmd=None):
     agreements = 0
     route_agreements = 0
     latencies = []
-    failures_seen = 0
     for number, (message, intent, route) in enumerate(MESSAGES, 1):
         name = f"message {number}"
         started = time.time()
@@ -177,14 +176,15 @@ def run(base, metrics_url=None, metrics_cmd=None):
             f"{name}: reply passes the format check",
             ", ".join(trace.get("format_errors") or []),
         )
-        # The chosen model must serve the route, unless the controller or the
-        # deadline moved the request, which the trace must then explain.
-        moved = trace["model"] != model_for_route.get(trace["route"])
+        # trace.route is the route after any move, so compare with what Jev
+        # chose first. A different model must carry a reason in the trace.
+        first_route = trace.get("jev_choice") or trace["route"]
+        moved = trace["model"] != model_for_route.get(first_route)
         explained = bool(trace.get("fallback_reason") or trace.get("controller_action"))
         results.check(
             not moved or explained,
-            f"{name}: model matches route {trace['route']}",
-            f"{model}, fallback: {trace.get('fallback_reason')}" if moved else model,
+            f"{name}: model serves the first route {first_route}",
+            f"{model}, moved without a reason" if moved and not explained else model,
         )
         results.check(
             all(fact in result["reply"] for fact in result["policy_facts"]),
@@ -201,7 +201,6 @@ def run(base, metrics_url=None, metrics_cmd=None):
                 f"{name}: mock routing as expected ({route})",
                 f"got intent {result['intent']}, route {trace['route']}",
             )
-        failures_seen += trace["format_check"] == "failed"
         print(f"  {name}: {elapsed * 1000:.0f} ms round trip, router {trace['router']}")
 
     total = len(MESSAGES)
@@ -230,11 +229,24 @@ def run(base, metrics_url=None, metrics_cmd=None):
             grew or full,
             f"monitor: {model} window has {mon_after[model]['samples']} samples",
         )
+    for model in sorted(used_after):
+        failed = used_after[model]["failed_calls"] - used_before[model]["failed_calls"]
+        results.check(
+            failed <= 0,
+            f"health usage: {model} had no failed calls during the run",
+            f"{failed} failed" if failed > 0 else "",
+        )
     stuck = [m for m, s in mon_after.items() if s["disabled_by_controller"]]
     results.check(not stuck, "controller: no model disabled", ", ".join(stuck))
-    new_actions = len(after["interventions"]) - len(before["interventions"])
+
+    # /v1/health lists only the latest interventions, so compare entries, not
+    # list lengths, which stop changing once the list is full.
+    def keys(health):
+        return {(i["at"], i["backend"], i["action"]) for i in health["interventions"]}
+
+    new_actions = keys(after) - keys(before)
     results.check(
-        new_actions <= 0, "controller: no new interventions", str(new_actions)
+        not new_actions, "controller: no new interventions", str(len(new_actions))
     )
     results.check(after["status"] == "ok", "health status is ok", after["status"])
     breaker = after.get("jev_breaker", {})
@@ -254,14 +266,22 @@ def run(base, metrics_url=None, metrics_cmd=None):
     else:
         print("  semantic monitor: no scored samples yet (collecting)")
 
-    metrics_end = read_metrics(metrics_url, metrics_cmd) if metrics_start else None
+    metrics_end = None
+    if metrics_start:
+        try:
+            metrics_end = read_metrics(metrics_url, metrics_cmd)
+        except (URLError, OSError, subprocess.SubprocessError) as exc:
+            results.check(
+                False, "metrics source reachable at the end", type(exc).__name__
+            )
     if metrics_start and metrics_end:
         gained = metrics_end[0].get("gateway_chat_requests", 0) - metrics_start[0].get(
             "gateway_chat_requests", 0
         )
         results.check(
-            gained == delivered,
-            f"Prometheus: gateway_chat_requests rose by {gained:g} (sent {delivered})",
+            gained >= delivered,
+            f"Prometheus: gateway_chat_requests rose by {gained:g} (sent {delivered}; "
+            "more means other traffic)",
         )
         completed = metrics_end[0].get("gateway_backend_calls_completed", 0) - (
             metrics_start[0].get("gateway_backend_calls_completed", 0)
