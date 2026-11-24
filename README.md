@@ -501,7 +501,7 @@ Both instances get shelved to save allocation. A systemd unit on each starts its
 
 | Instance | Unit | What it starts |
 | --- | --- | --- |
-| CPU | `smart-gateway-cpu.service` | `compose.yml` as project `smart-gateway-prototype`, from the images of the last deploy (no build) |
+| CPU | `smart-gateway-cpu.service` | `compose.yml` under the project name it already runs as, from the images of the last deploy (no build) |
 | GPU | `smart-gateway-gpu.service` | `compose.gpu.yml` as project `smart-gateway-gpu`, `vllm-small` first, then `vllm-large` |
 
 Each unit runs `down` and then `up -d --wait`, so Compose starts the services in order and waits until they are healthy. That matters most on the GPU host. Docker restarts containers at boot by itself, but all at once and ignoring `depends_on`, so both vLLM servers would claim GPU memory together. Before starting, the GPU unit runs [`gpu-preflight.sh`](deploy/autostart/gpu-preflight.sh), which checks three things:
@@ -513,9 +513,13 @@ If any of these is not ready, the unit tries again every 30 seconds, up to 10 ti
 
 **Install**, once per instance, from its checkout. Starting the unit restarts that stack once: a few seconds on the CPU instance, a few minutes on the GPU host while the models load.
 
+On the CPU instance, first run `docker compose ls`. Note the stack's NAME, and the folder in CONFIG FILES. The unit must use both, or its `down` misses the running stack and its `up` fails on port 8080.
+
 ```bash
-# CPU instance, in ~/smart-ai-gateway-prototype
-sed "s|CHECKOUT_DIR|$PWD|g" deploy/autostart/smart-gateway-cpu.service \
+# CPU instance, in the folder that `docker compose ls` shows; PROJECT is its NAME
+PROJECT=smart-gateway-prototype
+sed -e "s|CHECKOUT_DIR|$PWD|g" -e "s|PROJECT_NAME|$PROJECT|g" \
+  deploy/autostart/smart-gateway-cpu.service \
   | sudo tee /etc/systemd/system/smart-gateway-cpu.service >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable --now smart-gateway-cpu

@@ -12,7 +12,7 @@ GPU = (
     "/usr/bin/docker compose -f compose.gpu.yml --env-file env/gpu.env "
     "-p smart-gateway-gpu"
 )
-CPU = "/usr/bin/docker compose -p smart-gateway-prototype"
+CPU = "/usr/bin/docker compose -p PROJECT_NAME"
 
 
 def service(name: str) -> dict[str, list[str]]:
@@ -46,10 +46,9 @@ def test_units_stop_then_start_the_stack_in_order(name, compose):
     assert "--build" not in " ".join(unit["ExecStart"])
 
 
-def test_units_match_the_readme_commands():
+def test_gpu_unit_matches_the_readme_commands():
     readme = (ROOT / "README.md").read_text()
-    for compose in (GPU, CPU):
-        assert compose.removeprefix("/usr/bin/") + " up -d" in readme
+    assert GPU.removeprefix("/usr/bin/") + " up -d" in readme
 
 
 def test_gpu_unit_checks_the_host_first():

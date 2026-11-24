@@ -1,6 +1,8 @@
 # Starts the gateway stack (compose.yml) when the CPU instance boots,
 # including after an unshelve. Install it with the steps in the README,
-# "Start at boot"; they replace CHECKOUT_DIR with the checkout's path.
+# "Start at boot"; they replace CHECKOUT_DIR with the checkout's path and
+# PROJECT_NAME with the Compose project the stack already runs as (the NAME
+# column of `docker compose ls`), so `down` acts on that stack.
 #
 # Starting through Compose keeps depends_on (Postgres healthy before the
 # gateway) and --wait reports a stack that never gets healthy as a failure.
@@ -17,9 +19,9 @@ StartLimitBurst=10
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=CHECKOUT_DIR
-ExecStartPre=/usr/bin/docker compose -p smart-gateway-prototype down
-ExecStart=/usr/bin/docker compose -p smart-gateway-prototype up -d --wait
-ExecStop=/usr/bin/docker compose -p smart-gateway-prototype down
+ExecStartPre=/usr/bin/docker compose -p PROJECT_NAME down
+ExecStart=/usr/bin/docker compose -p PROJECT_NAME up -d --wait
+ExecStop=/usr/bin/docker compose -p PROJECT_NAME down
 TimeoutStartSec=10min
 Restart=on-failure
 RestartSec=30s
