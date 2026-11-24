@@ -535,7 +535,7 @@ sudo systemctl enable --now smart-gateway-gpu
 
 ```bash
 systemctl status smart-gateway-gpu --no-pager      # or smart-gateway-cpu
-journalctl -u smart-gateway-gpu -b --no-pager      # what happened at this boot
+sudo journalctl -u smart-gateway-gpu -b --no-pager # what happened at this boot (needs sudo)
 ```
 
 If the unit failed, the log names the reason, for example `VLLM_BIND_IP=... is not an address of this host`. Fix it, then run `sudo systemctl restart smart-gateway-gpu`.
