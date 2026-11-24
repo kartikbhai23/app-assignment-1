@@ -30,12 +30,11 @@ dev = [
     "pre-commit>=3.7",
     "pyyaml>=6.0",
 ]
-# Offline probe extra: ModelLens (with torch and transformers; its viz extra
-# is needed because importing modellens loads plotly) for reading
+# Offline probe extra: ModelLens (with torch and transformers) for reading
 # Qwen3-1.7B activations. Kept out of the gateway image; see docs/PROBE.md.
 # Install with `uv sync --extra dev --extra probe`.
 probe = [
-    "modellens[viz] @ git+https://github.com/sv642-hub/DSAN-6600-ModelLens@587009edd77f8798a522093576a0d656a604b427",
+    "modellens @ git+https://github.com/SebastianVillalobosAlva/ModelLens@0d900a56f7766e494da5a2f5bf5a4dcbe76a29f5",
 ]
 
 # Build backend

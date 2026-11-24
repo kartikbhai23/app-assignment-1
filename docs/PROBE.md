@@ -44,9 +44,11 @@ The standard error is about 0.2 to 0.3 points at 4,000 runs and 0.5 at 2,000. So
 
 ## Reading real activations with ModelLens
 
-[ModelLens](https://github.com/sv642-hub/DSAN-6600-ModelLens) is an interpretability toolkit from DSAN 6600 that captures a PyTorch model's layer outputs with forward hooks. ModelLens's `probe_features` reads the output of a Qwen3 decoder layer (`model.layers.N`) and pools it into one vector: `last` keeps the final real token, and `mean` averages over real tokens. `src/app_assignment_1/probe_modellens.py` wraps it as the real extractor, `ModelLensExtractor`. Pooling lives in ModelLens, so other ModelLens users get it too. `probe_features` can also read several layers in one pass, which helps when choosing a layer by cross-validation. The prompt and reply are joined with the tokenizer's chat template.
+[ModelLens](https://github.com/SebastianVillalobosAlva/ModelLens) is Sebastian's interpretability toolkit. It captures a PyTorch model's layer outputs with forward hooks, and it supports Qwen3. It also has its own linear probes (`modellens.analysis.probing`: `train_probe`, `probe_sweep`, `apply_probe`), which help with exploring, for example choosing a layer with `probe_sweep`.
 
-ModelLens, torch and transformers are in the optional `probe` extra, pinned to one ModelLens commit. The gateway image and CI never install it. Install it on the GPU host, or any machine with enough memory for Qwen3-1.7B:
+`src/app_assignment_1/probe_modellens.py` uses it for the real extractor, `ModelLensExtractor`. The extractor captures one Qwen3 decoder layer (`model.layers.N`) with ModelLens and pools it with the same function ModelLens's probes use: `last` keeps the final token, and `mean` averages over all tokens. The prompt and reply are joined with the tokenizer's chat template. The gate itself stays here (`train_probe` and `run_gate` in `probe.py`), because ModelLens's probes report accuracy, while the gate compares AUROC against token confidence.
+
+ModelLens, torch and transformers are in the optional `probe` extra, pinned to one ModelLens commit. The gateway image and CI never install it. Install it on the GPU host, or on any machine with enough memory for Qwen3-1.7B:
 
 ```bash
 uv sync --extra dev --extra probe
@@ -68,6 +70,7 @@ What was checked: the unit tests use a fake lens. By hand, on a tiny randomly in
 Notes:
 
 - The vector is the raw layer output. For the last layer, that is before the final norm, so it differs from the last entry of transformers' `hidden_states`.
+- `last` pooling takes the final position, so pass one example at a time (as `extract` does), not a padded batch.
 - The proposed primary position, the last intent-label token, is not built yet. It needs the reply's token offsets.
 - Pin `revision` for a gate run and record the layer and pooling in `GateRunInfo`.
 

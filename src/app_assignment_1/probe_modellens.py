@@ -1,10 +1,11 @@
 """Real activation extractor for the offline probe, built on ModelLens.
 
-ModelLens (https://github.com/sv642-hub/DSAN-6600-ModelLens) wraps a
-HuggingFace model and captures layer outputs with forward hooks. Its
-`probe_features` reads one decoder layer of Qwen3-1.7B and pools it into one
-vector. This module only adapts that to `ActivationExtractor`, so
-`train_probe` and `run_gate` in `probe.py` work on real activations.
+ModelLens (https://github.com/SebastianVillalobosAlva/ModelLens) wraps a
+HuggingFace model and captures layer outputs with forward hooks. This module
+captures one Qwen3-1.7B decoder layer with it and pools the layer with the
+same function ModelLens's own linear probes use
+(`modellens.analysis.probing`). It only adapts that to `ActivationExtractor`,
+so `train_probe` and `run_gate` in `probe.py` work on real activations.
 
 ModelLens, torch and transformers are in the optional `probe` extra and are
 imported only by `ModelLensExtractor.from_pretrained`, so the gateway and the
@@ -13,6 +14,7 @@ test suite never load them. Nothing here runs in the gateway.
 
 import importlib
 import math
+from collections.abc import Callable
 from typing import Any, Literal, get_args
 
 Pooling = Literal["last", "mean"]
@@ -50,7 +52,9 @@ class ModelLensExtractor:
         layer: int,
         pooling: Pooling = "last",
         device: str | None = None,
+        pool: Callable[[Any, str], Any] | None = None,
     ):
+        """`pool` defaults to ModelLens's probe pooling; tests pass a fake."""
         if layer < 0:
             raise ValueError("layer must be 0 or more.")
         if pooling not in POOLINGS:
@@ -60,6 +64,7 @@ class ModelLensExtractor:
         self.layer = layer
         self.pooling: Pooling = pooling
         self.device = device
+        self.pool = pool
         self.layer_name = LAYER_NAME.format(layer=layer)
         if self.layer_name not in lens.layer_names():
             raise ValueError(f"Layer '{self.layer_name}' not found.")
@@ -108,9 +113,25 @@ class ModelLensExtractor:
         tokens = self.tokenizer(self.format_text(prompt, reply), return_tensors="pt")
         if self.device is not None:
             tokens = tokens.to(self.device)
-        features = self.lens.probe_features(tokens, self.layer_name, self.pooling)
-        # Batch of one: shape [1, hidden].
-        vector: list[float] = features[self.layer_name][0].tolist()
+        self.lens.attach_layers([self.layer_name])
+        self.lens.run(tokens)
+        activation = self.lens.get_layer_activation(self.layer_name)
+        if activation is None:
+            raise RuntimeError(f"No activation captured for {self.layer_name}.")
+        pool = self.pool or _modellens_pool()
+        # Batch of one: [1, tokens, hidden] pools to [1, hidden].
+        vector: list[float] = pool(activation, self.pooling)[0].tolist()
         if not all(math.isfinite(value) for value in vector):
             raise ValueError("Activations must be finite numbers.")
         return vector
+
+
+def _modellens_pool() -> Callable[[Any, str], Any]:
+    """ModelLens's pooling for its own probes, so features here match
+    `modellens.analysis.probing.train_probe` on the same layer."""
+    try:
+        probing = importlib.import_module("modellens.analysis.probing")
+    except ImportError as error:
+        raise ImportError(MISSING_EXTRA) from error
+    pool: Callable[[Any, str], Any] = probing._pool
+    return pool
