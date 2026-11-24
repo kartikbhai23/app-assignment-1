@@ -391,13 +391,16 @@ git clone --branch main --single-branch \
   https://github.com/sv642-hub/app-assignment-1.git smart-ai-gateway-prototype
 cd smart-ai-gateway-prototype
 docker compose version
+```
+
+Before starting Compose, set your own database password as described in [Storage](#storage) and set `APP_ENVIRONMENT=production` in `env/.env`. The production template sets this for you. The gateway then refuses the public database password and demo operator token. Keep `compose.demo.yml` on the local demo stack.
+
+```bash
 docker compose -p smart-gateway-prototype up -d --build --wait
 docker compose -p smart-gateway-prototype ps
 curl -fsS http://127.0.0.1:8080/v1/health
 python3 scripts/smoke_compose.py http://127.0.0.1:8080
 ```
-
-Before the first start that includes Postgres, set your own database password as in [Storage](#storage); otherwise the stack runs with the public throwaway password.
 
 These deployment commands target `main` after this PR is merged. For updates:
 
