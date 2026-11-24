@@ -2,7 +2,7 @@
 
 A live run of the three simulated faults on one stack, with no restarts between them. For each fault the script shows the monitor noticing, the controller disabling the small model (`qwen3-1.7b`), traffic moving to `qwen3-4b`, and the small model coming back after the cooldown.
 
-Everything here uses the mock backends. It shows that the loop reacts; it says nothing about how real Qwen models fail. The gateway refuses to start with the public demo token when `APP_ENVIRONMENT` is `staging` or `production`. Do not run it on the deployment testers use: it replaces the running stack and resets its history, and it turns on the operator routes with a public token.
+Everything here uses the mock backends. It shows that the loop reacts; it says nothing about how real Qwen models fail. The gateway refuses to start with the public demo token when `APP_ENVIRONMENT` is `staging` or `production`. Do not run it on the deployment testers use: it replaces the running stack and turns on the operator routes with a public token.
 
 ## Before the demo
 
@@ -21,7 +21,7 @@ python3 scripts/chaos_demo.py --scenario outage
 python3 scripts/chaos_demo.py --prometheus     # also query Prometheus while each model is disabled
 ```
 
-Scenarios: `bad_format`, `outage`, `label_swap`. Each one clears every fault, lifts any disable and starts the small model's failure and semantic windows again first, so you can rerun any of them in any order and the counts in the controller's reason are that scenario's own. To start the windows again it holds and releases the small model through the operator routes, so Health shows an `operator_disabled` and an `operator_enabled` entry with reason `demo reset` before each scenario. The script exits with a non-zero status and `DEMO FAILED` if the stack does not behave as described below.
+Scenarios: `bad_format`, `outage`, `label_swap`. Each one clears every fault, lifts any disable and starts the small model's failure and semantic windows again first, so you can rerun any of them in any order and the counts in the controller's reason are that scenario's own. To start the windows again it holds and releases the small model through the operator routes, so Health shows an `operator_disabled` and an `operator_enabled` entry with reason `demo reset` before each scenario. The script exits with a non-zero status and `DEMO FAILED` if the stack does not behave as described below. It clears every fault when it ends, also after a failure or Ctrl-C, and prints a warning with the manual command if it cannot.
 
 ## What to say, per scenario
 

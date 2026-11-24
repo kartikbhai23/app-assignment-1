@@ -178,3 +178,24 @@ def test_script_parses_on_python_3_9() -> None:
 def test_demo_override_matches_the_token() -> None:
     override = (SCRIPT.parent.parent / "compose.demo.yml").read_text()
     assert demo.DEMO_TOKEN in override
+
+
+def test_a_failed_run_clears_the_fault(monkeypatch: pytest.MonkeyPatch) -> None:
+    with TestClient(create_app(demo_settings())) as client:
+        api = ClientApi(client)
+        monkeypatch.setattr(demo, "MAX_MESSAGES", 1)
+        monkeypatch.setattr(demo, "Api", lambda _url, _token: api)
+        code = demo.main(["http://unused", "--scenario", "label_swap"])
+        assert code == 1
+        # No fault left: a standard message is answered with its own intent.
+        reply = client.post("/v1/chat", json={"message": demo.STANDARD}).json()
+        assert reply["intent"] == "card_arrival"
+
+
+def test_unreachable_gateway_says_demo_failed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert demo.main(["http://127.0.0.1:1", "--scenario", "outage"]) == 1
+    err = capsys.readouterr().err
+    assert "DEMO FAILED: cannot reach" in err
+    assert "Traceback" not in err
