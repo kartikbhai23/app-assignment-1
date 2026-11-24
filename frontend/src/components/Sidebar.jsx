@@ -47,8 +47,7 @@ export default function Sidebar({ view, onNavigate, onNewChat, health, healthErr
       </nav>
 
       <p className="muted sidebar-note">
-        Jev is not a separate screen: it picks the route for every chat message. Open Show details on a reply to see
-        which router answered. Health shows the numbers.
+        Jev picks the route for every chat message. Show details on a reply shows which router answered.
       </p>
 
       <div className="status-card">

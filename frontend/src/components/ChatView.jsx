@@ -37,6 +37,38 @@ export function writeSaved(key, value) {
   }
 }
 
+// Saved data from an older deploy may not fit what the screens expect. Check
+// the shape and drop it if it does not, so a bad key cannot crash every refresh.
+export function readSavedDraft() {
+  const draft = readSaved(DRAFT_KEY, "");
+  if (typeof draft === "string") return draft;
+  writeSaved(DRAFT_KEY, "");
+  return "";
+}
+
+function validTurn(t) {
+  if (!t || typeof t !== "object" || !Number.isInteger(t.id) || typeof t.message !== "string") return false;
+  if (t.status === "pending") return true;
+  if (t.status === "error") return typeof t.error === "string";
+  if (t.status !== "done") return false;
+  const r = t.result;
+  return (
+    !!r &&
+    typeof r.reply === "string" &&
+    Array.isArray(r.policy_facts) &&
+    !!r.trace &&
+    typeof r.trace === "object" &&
+    Array.isArray(r.trace.format_errors)
+  );
+}
+
+export function readSavedTurns() {
+  const saved = readSaved(TURNS_KEY, []);
+  if (Array.isArray(saved) && saved.every(validTurn)) return saved;
+  writeSaved(TURNS_KEY, []);
+  return [];
+}
+
 export { DRAFT_KEY, TURNS_KEY };
 
 const TOPICS = [
@@ -132,7 +164,7 @@ function Turn({ turn }) {
 }
 
 export default function ChatView({ turns, onSend }) {
-  const [message, setMessage] = useState(() => readSaved(DRAFT_KEY, ""));
+  const [message, setMessage] = useState(readSavedDraft);
   const endRef = useRef(null);
   const busy = turns.some((t) => t.status === "pending");
   const canSend = !busy && message.trim().length > 0;
@@ -222,6 +254,7 @@ export default function ChatView({ turns, onSend }) {
               </svg>
             </button>
           </div>
+          {/* Counts UTF-16 units like the textarea's maxLength, so it is never looser than the server. */}
           <p className={`counter${message.length >= MAX_CHARS ? " counter-full" : ""}`}>
             {message.length} / {MAX_CHARS} characters
           </p>

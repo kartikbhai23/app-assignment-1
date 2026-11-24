@@ -545,6 +545,32 @@ describe("Chat keeps its state in the tab", () => {
   it("no longer shows disabled Jev and Dashboard items", async () => {
     renderWith(fakeGateway());
     expect(screen.queryByText("soon")).not.toBeInTheDocument();
-    expect(screen.getByText(/Jev is not a separate screen/)).toBeInTheDocument();
+    expect(screen.getByText(/Jev picks the route for every chat message/)).toBeInTheDocument();
+  });
+
+  it("clears the unsent draft on New chat, also from Health", async () => {
+    const user = renderWith(fakeGateway());
+    await user.type(screen.getByLabelText("Message"), "private draft");
+    await user.click(screen.getByRole("button", { name: /New chat/ }));
+    expect(screen.getByLabelText("Message")).toHaveValue("");
+    expect(window.sessionStorage.getItem("gateway.chat.draft")).toBeNull();
+    await user.type(screen.getByLabelText("Message"), "again");
+    await user.click(screen.getByRole("button", { name: /^Health/ }));
+    await user.click(screen.getByRole("button", { name: /New chat/ }));
+    expect(screen.getByLabelText("Message")).toHaveValue("");
+    expect(window.sessionStorage.getItem("gateway.chat.draft")).toBeNull();
+  });
+
+  it.each([
+    ["turns", "[null]"],
+    ["turns", JSON.stringify([{ id: 0, message: "hi", status: "done" }])],
+    ["turns", JSON.stringify([{ message: "hi", status: "pending" }])],
+    ["draft", "123"],
+  ])("starts empty and sends when saved %s is malformed (%s)", async (key, raw) => {
+    window.sessionStorage.setItem(`gateway.chat.${key}`, raw);
+    const user = renderWith(fakeGateway());
+    expect(screen.getByLabelText("Message")).toHaveValue("");
+    await user.type(screen.getByLabelText("Message"), "I lost my card{Enter}");
+    expect(await screen.findByText(/Freeze your card/)).toBeInTheDocument();
   });
 });

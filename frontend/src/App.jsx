@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { GatewayError, getHealth, sendChat } from "./api.js";
-import ChatView, { TURNS_KEY, readSaved, writeSaved } from "./components/ChatView.jsx";
+import ChatView, { DRAFT_KEY, TURNS_KEY, readSavedTurns, writeSaved } from "./components/ChatView.jsx";
 import HealthView from "./components/HealthView.jsx";
 import Sidebar from "./components/Sidebar.jsx";
 
@@ -15,15 +15,14 @@ function viewFromHash() {
 
 // A reply that was still pending when the page closed will never arrive.
 function restoreTurns() {
-  const saved = readSaved(TURNS_KEY, []);
-  if (!Array.isArray(saved)) return [];
-  return saved.map((t) =>
+  return readSavedTurns().map((t) =>
     t.status === "pending" ? { ...t, status: "error", error: "This message was interrupted by a page refresh. Send it again." } : t,
   );
 }
 
 export default function App() {
   const [view, setView] = useState(viewFromHash);
+  const [chatKey, setChatKey] = useState(0);
   const [turns, setTurns] = useState(restoreTurns);
   const nextTurnId = useRef(turns.reduce((max, t) => Math.max(max, t.id + 1), 0));
   const [health, setHealth] = useState(null);
@@ -89,6 +88,8 @@ export default function App() {
         onNavigate={go}
         onNewChat={() => {
           setTurns([]);
+          writeSaved(DRAFT_KEY, "");
+          setChatKey((k) => k + 1);
           go("chat");
         }}
         health={health}
@@ -96,7 +97,7 @@ export default function App() {
       />
       <main className="main">
         {view === "chat" ? (
-          <ChatView turns={turns} onSend={send} />
+          <ChatView key={chatKey} turns={turns} onSend={send} />
         ) : (
           <HealthView health={health} error={healthError} />
         )}
