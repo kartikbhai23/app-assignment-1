@@ -388,64 +388,67 @@ def test_a_controller_rollback_waits_for_the_store(tmp_path):
         assert [e.action for e in store.release_events] == ["deployed", "rolled_back"]
 
 
-class RaceStore(MemoryStore):
-    """The controller rolls back while the operator's change is being saved."""
+class PausedReleaseStore(MemoryStore):
+    """Pause an operator write while the previous release's last call finishes."""
 
     def __init__(self) -> None:
         super().__init__(100)
-        self.gateway = None
-        self.race = False
+        self.entered = asyncio.Event()
+        self.resume = asyncio.Event()
 
     async def save_release_events(self, items: Sequence[ReleaseEvent]) -> None:
+        if any(event.version == "v2-outage" for event in items):
+            self.entered.set()
+            await self.resume.wait()
         await super().save_release_events(items)
-        if self.race and self.gateway is not None:
-            self.race = False
-            self.gateway.releases.roll_back(SMALL, "during the save")
 
 
-def test_the_newest_saved_event_matches_after_a_race(tmp_path):
-    store = RaceStore()
-    with TestClient(create_app(make_settings(tmp_path), store=store)) as client:
-        store.gateway = client.app.state.gateway  # type: ignore[attr-defined]
-        deploy(client, "v2-good")
-        store.race = True
-        deploy(client, "v2-bad-format")
-        assert releases(client)[SMALL]["version"] == "v2-bad-format"
-        chat(client)  # saves the queued events
-        latest = asyncio.run(store.latest_release_events())
-        assert [(e.backend, e.version) for e in latest] == [(SMALL, "v2-bad-format")]
+def test_an_operator_ack_matches_storage_when_a_call_finishes_during_save(tmp_path):
+    async def main():
+        store = PausedReleaseStore()
+        settings = make_settings(tmp_path)
+        gateway = Gateway(settings, MockJevRouter(settings.intents_path), store=store)
+        await gateway.deploy_release(SMALL, "v2-good", "first deploy")
+        for _ in range(5):
+            await gateway.chat(STANDARD)
+        backend = gateway.backend(SMALL)
+        original = backend.generate
+        entered, resume, finishing = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
+        async def generate(message):
+            reply = await original(message)
+            entered.set()
+            await resume.wait()
+            finishing.set()
+            return reply
 
-class ConfirmRaceStore(MemoryStore):
-    """The controller confirms a release while an operator deploy is saving."""
+        backend.generate = generate
+        old_chat = asyncio.create_task(gateway.chat(STANDARD))
+        await asyncio.wait_for(entered.wait(), 1)
+        deploy = asyncio.create_task(
+            gateway.deploy_release(SMALL, "v2-outage", "concurrent deploy")
+        )
+        await asyncio.wait_for(store.entered.wait(), 1)
+        resume.set()
+        await asyncio.wait_for(finishing.wait(), 1)
+        try:
+            # The old call has reached accounting, but cannot confirm during
+            # the operator's write. The previously known-good base stays the target.
+            assert gateway.releases.state[SMALL].status == "watching"
+        finally:
+            store.resume.set()
+        ack = await asyncio.wait_for(deploy, 1)
+        saved = (await store.latest_release_events())[0]
+        assert (ack.version, ack.rollback_target) == (
+            saved.version,
+            saved.rollback_target,
+        )
+        assert saved.rollback_target == "base"
+        assert (await old_chat).trace.simulated_latency_ms == 1
+        await gateway.finish_saves()
+        assert gateway.releases.state[SMALL].watched_samples == 0
 
-    def __init__(self) -> None:
-        super().__init__(100)
-        self.gateway = None
-        self.race = False
-
-    async def save_release_events(self, items: Sequence[ReleaseEvent]) -> None:
-        await super().save_release_events(items)
-        if self.race and self.gateway is not None:
-            self.race = False
-            self.gateway.controller.watching.pop(SMALL)
-            self.gateway.releases.confirm(SMALL)
-
-
-def test_a_confirmation_during_a_deploy_updates_the_target(tmp_path):
-    """Review of #107, item 7."""
-    store = ConfirmRaceStore()
-    with TestClient(create_app(make_settings(tmp_path), store=store)) as client:
-        store.gateway = client.app.state.gateway  # type: ignore[attr-defined]
-        deploy(client, "v2-good")
-        store.race = True
-        body = deploy(client, "v2-outage").json()
-        assert (body["version"], body["rollback_target"]) == ("v2-outage", "v2-good")
-        chat(client)  # saves the queued events
-        latest = asyncio.run(store.latest_release_events())
-        assert [(e.version, e.rollback_target) for e in latest] == [
-            ("v2-outage", "v2-good")
-        ]
+    asyncio.run(main())
 
 
 def test_waiting_controller_events_are_saved_before_a_deploy(tmp_path):
@@ -680,3 +683,24 @@ def test_the_watch_is_never_shorter_than_the_semantic_minimum(tmp_path):
     assert gateway_for(settings).controller.watch_samples == 9
     off = make_settings(tmp_path, semantic_min_samples=9)
     assert gateway_for(off).controller.watch_samples == 6
+
+
+def test_semantic_watch_waits_for_comparable_intent_evidence(tmp_path):
+    settings = make_settings(
+        tmp_path,
+        semantic_window=6,
+        semantic_min_samples=3,
+        semantic_baseline_disagreement_rate=0.0,
+        semantic_actions_enabled=True,
+        jev_breaker_failures=30,
+    )
+
+    class FailingJev(MockJevRouter):
+        async def route(self, message):
+            raise ConnectionError("test outage")
+
+    with TestClient(create_app(settings, FailingJev(settings.intents_path))) as client:
+        deploy(client, "v2-label-swap")
+        for _ in range(6):
+            assert chat(client).status_code == 200
+        assert releases(client)[SMALL]["status"] == "watching"

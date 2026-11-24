@@ -143,6 +143,8 @@ class Controller:
     def _count_watch(self, name: BackendName) -> None:
         if name not in self.watching:
             return
+        if self.watching[name] >= self.watch_samples:
+            return
         self.watching[name] += 1
         count = self.watching[name]
         for hook in self.on_watched:
