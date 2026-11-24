@@ -24,7 +24,7 @@ Separate clones for branch work, so the deployed checkout stays on `main`:
 
 The vLLM API key is in `~/.vllm_api_key`, mode 600.
 
-**To check** the public address testers use: `USER_BRIEF.md` gives it, and a Jetstream2 public IP can change when an instance is shelved and unshelved. After an unshelve, compare the address in Exosphere with `USER_BRIEF.md`.
+**Public address.** Testers reach the app at the address in `USER_BRIEF.md`, the only file that holds it. It is the instance's public IP, and it changes if someone shelves the instance and lets the IP be released. To keep it, keep the public IP when shelving in Exosphere. If it changes anyway, update `USER_BRIEF.md` straight after the unshelve, and tell the testers.
 
 ## GPU instance (`gateway-gpu`)
 
@@ -44,6 +44,8 @@ The two vLLM servers. Only the CPU instance can reach them, over the private net
 Newest first. Times are UTC.
 
 ### 2026-11-24
+
+- **CPU: public IP changed.** It was released during an earlier shelve, so `USER_BRIEF.md` pointed at an address that no longer answered. The brief now has the current one, which serves the app and `/docs` from outside.
 
 - **CPU: off the public settings.**
   - **Before:** the stack had run on `env/compose.defaults.env` alone since it was deployed, with the public throwaway database password and `APP_ENVIRONMENT` left at `local`. The database port was never published, so only containers on the Compose network could use that password.
