@@ -53,9 +53,20 @@ class MockBackend:
 
     async def generate(self, message: str) -> BackendReply:
         await asyncio.sleep(self.config.latency_ms / 1000)
+        # The new faults draw a random number only when set, so the existing
+        # ones keep the same sequence.
+        if self.config.slow_rate and self.rng.random() < self.config.slow_rate:
+            # Simulated slow or hung model: the gateway's deadline may cut it.
+            await asyncio.sleep(self.config.slow_seconds)
         if self.rng.random() < self.config.error_rate:
             raise ConnectionError("Simulated backend outage")
         _, match = match_intent(self.intents, message)
+        if (
+            self.config.bad_prompt_rate
+            and self.rng.random() < self.config.bad_prompt_rate
+        ):
+            # Simulated bad prompt: a well-formed reply with no intent.
+            match = None
         if match is not None and self.rng.random() < self.config.label_swap_rate:
             # Simulated semantic fault: a confident reply for the wrong intent.
             # It passes the format check; only the semantic monitor sees it.

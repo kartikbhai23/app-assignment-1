@@ -89,7 +89,15 @@ Operators can act on the models without restarting the stack. Every operator rou
 - `POST /v1/operator/models/{name}/enable` lifts an operator hold, and also ends a controller cooldown early. The model starts with an empty window.
 - Holds live in gateway memory. After a restart every held model serves again, even though the last stored intervention for it still says `operator_disabled`. Disable it again after a restart.
 - Both take an optional JSON body `{"reason": "..."}` (up to 200 characters), saved in the intervention log as `operator_disabled` or `operator_enabled`. The reason is public: `GET /v1/health` lists it without a token. Do not put customer data or anything private in it. Both return the monitor rows; `disabled_by_operator` shows a hold.
-- `POST /v1/faults` sets a simulated fault on a mock model while it runs, in place of restarting with a Compose override. The body is `{"model": "qwen3-1.7b", "fault": "outage", "rate": 1}`. `fault` is `outage` (sets `error_rate`), `bad_format` (`fault_rate`), `label_swap` (`label_swap_rate`) or `none` (clears all three). `rate` is 0–1 and defaults to 1. It returns the model's config. Faults reset when the gateway restarts.
+- `POST /v1/faults` sets a simulated fault on a mock model while it runs, in place of restarting with a Compose override. The body is `{"model": "qwen3-1.7b", "fault": "outage", "rate": 1}`. `fault` is one of these:
+  - `outage` (sets `error_rate`): calls raise.
+  - `bad_format` (`fault_rate`): replies fail the format check.
+  - `label_swap` (`label_swap_rate`): replies carry the wrong intent.
+  - `slow` (`slow_rate` and `slow_seconds`): calls are held for `seconds` more, 0–120, which `slow` requires. The first model gets the request deadline minus the reserve for the other model (`APP_REQUEST_DEADLINE_SECONDS` minus `APP_ALTERNATE_RESERVE_SECONDS`, 30 s by default), so a longer hold makes it a failed call and the other model answers.
+  - `bad_prompt` (`bad_prompt_rate`): replies are a well-formed `unknown`, as a broken prompt would give. They pass the format check, so only the semantic monitor sees them, and nothing disables the model unless semantic actions are on.
+  - `none`: clears them all.
+
+  `rate` is 0–1 and defaults to 1. It returns the model's config. Faults reset when the gateway restarts.
 
 ```bash
 TOKEN='your-operator-token'

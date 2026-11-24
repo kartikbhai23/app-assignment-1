@@ -97,7 +97,7 @@ components:
     owner: Pavlos
     items:
       - built: Outage, bad format and label swap, by Compose override
-      - todo: Bad prompt
+      - built: Slow model and bad prompt, by POST /v1/faults
       - built: POST /v1/faults with operator token
 
   jev_intent:
