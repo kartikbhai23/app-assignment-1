@@ -103,6 +103,10 @@ class Releases:
             for name in self.backends
         }
         self.unsaved: list[ReleaseEvent] = []
+        # Goes up each time a model's config changes. A call records the value
+        # it started with, so an outcome from an older version is not counted
+        # against the new one.
+        self.generation: dict[BackendName, int] = dict.fromkeys(self.backends, 0)
         # Called after every change, with the event. The gateway starts or
         # ends the controller's watch and resets the monitor windows.
         self.on_change: list[Callable[[ReleaseEvent], None]] = []
@@ -121,19 +125,23 @@ class Releases:
         return base.model_copy(update=changes.model_dump(exclude_none=True), deep=True)
 
     def plan_deploy(self, name: BackendName, version: str, reason: str) -> ReleaseEvent:
-        """The event for an operator's deploy. Nothing changes until `apply`."""
+        """The event for an operator's deploy. Nothing changes until `apply`.
+
+        Every release under watch has a rollback target: a deploy from a
+        stable or rolled-back version targets that version, and a deploy over
+        a watched one keeps its target."""
         if version not in self.versions(name):
             raise UnknownVersion(version)
         current = self.state[name]
         if version == current.version:
             raise AlreadyServing(version)
+        if current.status == "watching" and version == current.rollback_target:
+            # Deploying the rollback target during a watch is a rollback: the
+            # version is known good, so there is nothing to watch.
+            return self.plan_rollback(name, reason, "operator")
         target = (
             current.version if current.status != "watching" else current.rollback_target
         )
-        if target == version:
-            # Deploying the rollback target is a rollback by another name; it
-            # is known good, so there is nothing to watch or return to.
-            target = None
         return ReleaseEvent(
             at=datetime.now(UTC),
             backend=name,
@@ -195,13 +203,15 @@ class Releases:
     def watched(self, name: BackendName, samples: int) -> None:
         self.state[name].watched_samples = samples
 
-    def apply(self, event: ReleaseEvent, notify: bool = True) -> None:
+    def apply(self, event: ReleaseEvent, restoring: bool = False) -> None:
         """Make the model serve `event.version` and record the new state."""
         backend = self.backends[event.backend]
-        if event.action != "confirmed":
+        if event.action != "confirmed" or restoring:
             # Replaces any fault set through /v1/faults: a version is the
-            # whole config.
+            # whole config. A confirmation while running leaves the config
+            # alone; at startup it sets the confirmed version's config.
             backend.config = self.config_for(event.backend, event.version)
+            self.generation[event.backend] += 1
         self.state[event.backend] = ModelRelease(
             name=event.backend,
             version=event.version,
@@ -215,9 +225,8 @@ class Releases:
             since=event.at,
             versions=self.versions(event.backend),
         )
-        if notify:
-            for hook in self.on_change:
-                hook(event)
+        for hook in self.on_change:
+            hook(event)
 
     def restore(self, latest: Iterable[ReleaseEvent]) -> None:
         """Put each model back on the release its newest saved event names. A
@@ -238,7 +247,7 @@ class Releases:
                     BASE_VERSION,
                 )
                 continue
-            self.apply(event)
+            self.apply(event, restoring=True)
 
     def stats(self) -> list[ModelRelease]:
         return [self.state[name].model_copy() for name in self.backends]

@@ -12,7 +12,9 @@ from pydantic import ValidationError
 from app_assignment_1.api import create_app
 from app_assignment_1.config import Settings
 from app_assignment_1.releases import load_catalog
+from app_assignment_1.router import MockJevRouter
 from app_assignment_1.schemas import ReleaseEvent
+from app_assignment_1.service import BackendUnavailable, Gateway
 from app_assignment_1.store import MemoryStore
 
 TOKEN = "operator-token-for-tests-only-0123456789"
@@ -281,13 +283,30 @@ def test_a_confirmed_release_becomes_the_rollback_target(client):
     assert (small["version"], small["status"]) == ("v2-good", "rolled_back")
 
 
-def test_deploying_the_rollback_target_leaves_none(client):
+def test_deploying_the_target_during_a_watch_is_a_rollback(client):
+    """Review of #107, item 3: the next deploy still has a target, so a bad
+    release after it is rolled back, not disabled."""
     deploy(client, "v2-good")
     response = deploy(client, "base")
-    assert (response.json()["status"], response.json()["rollback_target"]) == (
-        "watching",
+    body = response.json()
+    assert (body["version"], body["status"], body["rollback_target"]) == (
+        "base",
+        "rolled_back",
         None,
     )
+    assert deploy(client, "v2-bad-format").json()["rollback_target"] == "base"
+    actions = [chat(client).json()["trace"]["controller_action"] for _ in range(4)]
+    assert actions[-1].startswith("rolled back qwen3-1.7b to base")
+    assert releases(client)[SMALL]["status"] == "rolled_back"
+    assert not monitor(client)[SMALL]["disabled_by_controller"]
+
+
+def test_deploying_a_confirmed_target_is_watched(client):
+    deploy(client, "v2-good")
+    for _ in range(6):
+        chat(client)
+    body = deploy(client, "base").json()
+    assert (body["status"], body["rollback_target"]) == ("watching", "v2-good")
 
 
 # --- operator routes ---
@@ -397,7 +416,91 @@ def test_the_newest_saved_event_matches_after_a_race(tmp_path):
         assert [(e.backend, e.version) for e in latest] == [(SMALL, "v2-bad-format")]
 
 
+class ConfirmRaceStore(MemoryStore):
+    """The controller confirms a release while an operator deploy is saving."""
+
+    def __init__(self) -> None:
+        super().__init__(100)
+        self.gateway = None
+        self.race = False
+
+    async def save_release_events(self, items: Sequence[ReleaseEvent]) -> None:
+        await super().save_release_events(items)
+        if self.race and self.gateway is not None:
+            self.race = False
+            self.gateway.controller.watching.pop(SMALL)
+            self.gateway.releases.confirm(SMALL)
+
+
+def test_a_confirmation_during_a_deploy_updates_the_target(tmp_path):
+    """Review of #107, item 7."""
+    store = ConfirmRaceStore()
+    with TestClient(create_app(make_settings(tmp_path), store=store)) as client:
+        store.gateway = client.app.state.gateway  # type: ignore[attr-defined]
+        deploy(client, "v2-good")
+        store.race = True
+        body = deploy(client, "v2-outage").json()
+        assert (body["version"], body["rollback_target"]) == ("v2-outage", "v2-good")
+        chat(client)  # saves the queued events
+        latest = asyncio.run(store.latest_release_events())
+        assert [(e.version, e.rollback_target) for e in latest] == [
+            ("v2-outage", "v2-good")
+        ]
+
+
+def test_waiting_controller_events_are_saved_before_a_deploy(tmp_path):
+    """Review of #107, item 2: a rollback whose save failed must not be
+    saved after a newer deploy, or a restart would undo the deploy."""
+    store = SlowFailingStore()
+    settings = make_settings(tmp_path)
+    with TestClient(create_app(settings, store=store)) as client:
+        deploy(client, "v2-bad-format")
+        store.fail = True
+        for _ in range(4):
+            chat(client)
+        assert releases(client)[SMALL]["status"] == "rolled_back"
+        store.fail = False
+        deploy(client, "v2-good")
+        chat(client)
+        assert [(e.action, e.version) for e in store.release_events] == [
+            ("deployed", "v2-bad-format"),
+            ("rolled_back", "base"),
+            ("deployed", "v2-good"),
+        ]
+    with TestClient(create_app(settings, store=store)) as client:
+        small = releases(client)[SMALL]
+        assert (small["version"], small["status"]) == ("v2-good", "watching")
+
+
+def test_a_failed_deploy_save_keeps_waiting_events(tmp_path):
+    store = SlowFailingStore()
+    with TestClient(create_app(make_settings(tmp_path), store=store)) as client:
+        deploy(client, "v2-bad-format")
+        store.fail = True
+        for _ in range(4):
+            chat(client)
+        assert deploy(client, "v2-good").status_code == 503
+        gateway = client.app.state.gateway  # type: ignore[attr-defined]
+        assert [e.action for e in gateway.releases.unsaved] == ["rolled_back"]
+        assert releases(client)[SMALL]["version"] == "base"
+
+
 # --- restart ---
+
+
+def test_a_confirmed_release_runs_its_config_after_a_restart(tmp_path):
+    """Review of #107, item 1."""
+    store = MemoryStore(100)
+    settings = make_settings(tmp_path)
+    with TestClient(create_app(settings, store=store)) as client:
+        deploy(client, "v2-good")
+        for _ in range(6):
+            chat(client)
+        assert releases(client)[SMALL]["status"] == "stable"
+    with TestClient(create_app(settings, store=store)) as client:
+        assert releases(client)[SMALL]["version"] == "v2-good"
+        backends = {b["name"]: b for b in client.get("/v1/health").json()["backends"]}
+        assert backends[SMALL]["latency_ms"] == 1
 
 
 def test_a_restart_keeps_the_release(tmp_path):
@@ -494,3 +597,86 @@ def test_metrics_show_each_models_release(client):
     assert release % (LARGE, "stable") in lines
     action = 'gateway_controller_interventions_total{action="rolled_back",model="%s"}'
     assert f"{action % SMALL} 1.0" in lines
+
+
+# --- calls that span a change, rerouted calls, the semantic minimum ---
+
+
+def gateway_for(settings: Settings) -> Gateway:
+    return Gateway(settings, MockJevRouter(settings.intents_path))
+
+
+def test_calls_started_on_the_old_version_do_not_count(tmp_path):
+    """Review of #107, item 4: base fails every call, four slow calls are in
+    flight, and a good release is deployed. Their failures belong to base."""
+    g = gateway_for(make_settings(tmp_path))
+    small = g.backend(SMALL)
+    small.config.error_rate = 1
+    small.config.latency_ms = 200
+    g.backend(LARGE).config.available = False
+
+    async def main() -> list[int]:
+        calls = [asyncio.create_task(g.chat(STANDARD)) for _ in range(4)]
+        await asyncio.sleep(0.05)
+        await g.deploy_release(SMALL, "v2-good", "fix during an incident")
+        results = await asyncio.gather(*calls, return_exceptions=True)
+        return [0 if isinstance(r, BackendUnavailable) else 1 for r in results]
+
+    assert asyncio.run(main()) == [0, 0, 0, 0]
+    state = g.releases.state[SMALL]
+    assert (state.version, state.status) == ("v2-good", "watching")
+    assert len(g.controller.windows[SMALL]) == 0
+    assert g.usage[SMALL].failed_calls == 4
+
+
+def test_rerouted_calls_do_not_confirm_a_release(tmp_path):
+    """Review of #107, item 5: with the large model held, complex messages go
+    to the small model, where the semantic check never sees them."""
+    settings = make_settings(
+        tmp_path,
+        semantic_window=6,
+        semantic_min_samples=3,
+        semantic_baseline_disagreement_rate=0.0,
+        semantic_alert_margin=0.2,
+        semantic_actions_enabled=True,
+    )
+    with TestClient(create_app(settings, store=MemoryStore(100))) as client:
+        client.post(f"/v1/operator/models/{LARGE}/disable", headers=AUTH)
+        deploy(client, "v2-label-swap")
+        for _ in range(8):
+            assert chat(client, COMPLEX).json()["trace"]["model"] == SMALL
+        small = releases(client)[SMALL]
+        assert (small["status"], small["watched_samples"]) == ("watching", 0)
+        for _ in range(3):
+            chat(client)
+        assert releases(client)[SMALL]["status"] == "rolled_back"
+
+
+@pytest.mark.parametrize("min_samples", [5, 6])
+def test_the_watch_gives_the_semantic_check_its_samples(tmp_path, min_samples):
+    """Review of #107, item 6: the semantic check on the watch's last call
+    comes before the release is confirmed."""
+    settings = make_settings(
+        tmp_path,
+        semantic_window=6,
+        semantic_min_samples=min_samples,
+        semantic_baseline_disagreement_rate=0.0,
+        semantic_alert_margin=0.2,
+        semantic_actions_enabled=True,
+        release_watch_samples=6,
+    )
+    with TestClient(create_app(settings, store=MemoryStore(100))) as client:
+        deploy(client, "v2-label-swap")
+        for _ in range(6):
+            chat(client)
+        small = releases(client)[SMALL]
+        assert (small["version"], small["status"]) == ("base", "rolled_back")
+
+
+def test_the_watch_is_never_shorter_than_the_semantic_minimum(tmp_path):
+    settings = make_settings(
+        tmp_path, semantic_min_samples=9, semantic_actions_enabled=True
+    )
+    assert gateway_for(settings).controller.watch_samples == 9
+    off = make_settings(tmp_path, semantic_min_samples=9)
+    assert gateway_for(off).controller.watch_samples == 6
