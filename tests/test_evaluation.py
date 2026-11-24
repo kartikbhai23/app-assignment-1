@@ -10,12 +10,14 @@ import pytest
 
 from app_assignment_1.config import Settings
 from app_assignment_1.evaluation import (
+    Message,
     gold_classes,
     oracle,
     parse_banking77,
     parse_labelled_csv,
     reply_format_errors,
     score,
+    stratified_sample,
     wilson,
 )
 from app_assignment_1.labels import load_labels
@@ -403,3 +405,48 @@ def test_runner_split_is_part_of_the_run(tmp_path):
     with pytest.raises(SystemExit):
         run_eval.main(["run", "--target", "small", "--mock", "--split", "dev",
                        "--out", str(out)])  # fmt: skip
+
+
+def test_stratified_sample_covers_every_intent_and_repeats():
+    messages = [
+        Message(row, f"m{row}", gold)
+        for row, gold in enumerate(["a"] * 6 + ["b"] * 6 + ["c"] * 6)
+    ]
+    sample = stratified_sample(messages, 7, seed=6700)
+    golds = [m.gold for m in sample]
+    assert len(sample) == 7
+    assert sorted(golds.count(g) for g in "abc") == [2, 2, 3]
+    assert [m.row for m in sample] == sorted(m.row for m in sample)
+    assert sample == stratified_sample(messages, 7, seed=6700)
+    assert sample != stratified_sample(messages, 7, seed=1)
+    # Asking for more than there are returns them all.
+    assert len(stratified_sample(messages, 100, seed=6700)) == 18
+    with pytest.raises(ValueError, match="at least 1"):
+        stratified_sample(messages, 0, seed=6700)
+
+
+def test_runner_sample_is_its_own_run(tmp_path, capsys):
+    run_eval = load_script()
+    rows = [("card_arrival", 4), ("age_limit", 4), ("atm_support", 4)]
+    data = tmp_path / "set.csv"
+    data.write_text("text,intent\n" + "".join(
+        f"m{gold}{i},{gold}\n" for gold, n in rows for i in range(n)))  # fmt: skip
+    out = tmp_path / "s.jsonl"
+    args = ["run", "--target", "small", "--mock", "--dataset-csv", str(data),
+            "--out", str(out)]  # fmt: skip
+    assert run_eval.main([*args, "--sample", "6"]) == 0
+    header, items = run_eval.read_results(out)
+    assert header["sample"] == {"size": 6, "seed": 6700}
+    assert sorted({i["gold"] for i in items}) == [
+        "age_limit",
+        "atm_support",
+        "card_arrival",
+    ]
+    printed = capsys.readouterr().out
+    assert "6/6 (sample of 12, seed 6700)" in printed and "incomplete" not in printed
+    # Another seed, or no sample, is a different run.
+    for other in (["--sample", "6", "--seed", "1"], []):
+        with pytest.raises(SystemExit, match="different run"):
+            run_eval.main([*args, *other])
+    with pytest.raises(SystemExit):
+        run_eval.main([*args, "--sample", "6", "--limit", "3"])

@@ -26,6 +26,7 @@ import csv
 import hashlib
 import io
 import math
+import random
 import statistics
 from collections import Counter
 from collections.abc import Collection, Iterable, Sequence
@@ -128,6 +129,37 @@ def parse_labelled_csv(
     if split is not None and not messages:
         raise ValueError(f"No rows have split {split!r}")
     return messages
+
+
+def stratified_sample(
+    messages: Sequence[Message], size: int, seed: int
+) -> list[Message]:
+    """`size` messages spread evenly over the gold labels, the same every time
+    for the same seed.
+
+    Each label's messages are shuffled with the seed, then labels take turns
+    giving one message until `size` are chosen, so every label is covered
+    before any gets a second. Labels go in sorted order, so which labels get
+    one extra when `size` doesn't divide evenly is also fixed. The result is
+    in row order.
+    """
+    if size < 1:
+        raise ValueError("The sample size must be at least 1")
+    rng = random.Random(seed)
+    by_gold: dict[str, list[Message]] = {}
+    for message in messages:
+        by_gold.setdefault(message.gold, []).append(message)
+    queues = []
+    for gold in sorted(by_gold):
+        group = by_gold[gold][:]
+        rng.shuffle(group)
+        queues.append(group)
+    chosen: list[Message] = []
+    while len(chosen) < size and any(queues):
+        for queue in queues:
+            if queue and len(chosen) < size:
+                chosen.append(queue.pop())
+    return sorted(chosen, key=lambda message: message.row)
 
 
 def reply_format_errors(

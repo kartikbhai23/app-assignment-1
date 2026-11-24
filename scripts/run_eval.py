@@ -19,6 +19,11 @@ SHA-256, then cached in data/cache/ (ignored by git). `--dataset-csv PATH` is an
 CSV with `text` and `intent` columns, such as the fresh set. Add `--split dev`
 for a CSV with a `split` column, such as the dev split, to keep only those rows.
 
+The files are sorted by intent, so `--limit N` covers only the first few
+intents. For a quick check across all of them, use `--sample N` (with
+`--seed`, 6700 by default): N messages spread evenly over the intents, the
+same ones every time.
+
 Results are JSONL: one `run` line with the settings, then one `item` line per
 message, keyed by its row in the dataset. They hold no message text and no
 reply text. A run that stops can be started again with the same command, from
@@ -65,6 +70,7 @@ from app_assignment_1.evaluation import (
     reply_format_errors,
     score,
     sha256,
+    stratified_sample,
 )
 from app_assignment_1.intents import load_intents
 from app_assignment_1.labels import UNKNOWN, LabelSet, load_labels
@@ -274,6 +280,10 @@ async def run(args: argparse.Namespace) -> int:
     messages = list(dataset.messages)
     if args.limit:
         messages = messages[: args.limit]
+    sample = None
+    if args.sample:
+        messages = stratified_sample(messages, args.sample, args.seed)
+        sample = {"size": len(messages), "seed": args.seed}
 
     header: dict[str, Any] = {
         "type": "run",
@@ -282,6 +292,8 @@ async def run(args: argparse.Namespace) -> int:
         "dataset_size": len(dataset.messages),
         "target": args.target,
         "option_set_version": labels.option_set_version,
+        # A random sample is its own run: a file never mixes it with others.
+        "sample": sample,
     }
     client: httpx.AsyncClient | None = None
     if args.target == "gateway":
@@ -335,6 +347,7 @@ async def run(args: argparse.Namespace) -> int:
             "model",
             "mocked",
             "option_set_version",
+            "sample",
         )
         if any(old.get(key) != header[key] for key in keys):
             raise SystemExit(
@@ -395,7 +408,11 @@ def print_scores(paths: list[Path]) -> None:
         header, items = read_results(path)
         result = score(items, labels)
         low, high = result["accuracy_95ci"]
-        coverage = f"{result['messages']}/{header['dataset_size']}"
+        sample = header.get("sample")
+        expected = sample["size"] if sample else header["dataset_size"]
+        coverage = f"{result['messages']}/{expected}"
+        if sample:
+            coverage += f" (sample of {header['dataset_size']}, seed {sample['seed']})"
         print(
             f"{path.name}: {header['dataset']}, target {header['target']} "
             f"({header['model']}{', mock' if header.get('mocked') else ''})\n"
@@ -408,7 +425,7 @@ def print_scores(paths: list[Path]) -> None:
             f"p95 {_fmt(result['latency_ms_p95'], 0)} ms"
         )
         retry = sum(bool(i.get("error")) and not i.get("final") for i in items)
-        if result["messages"] < header["dataset_size"] or retry:
+        if result["messages"] < expected or retry:
             print(
                 f"  incomplete ({retry} failed calls to retry): rerun the same "
                 "command to finish it"
@@ -434,7 +451,7 @@ def cmd_oracle(args: argparse.Namespace) -> int:
     large_header, large = read_results(args.large)
     if (small_header["target"], large_header["target"]) != ("small", "large"):
         raise SystemExit("Pass the small results first, then the large results")
-    for key in ("dataset", "dataset_sha256", "option_set_version", "mocked"):
+    for key in ("dataset", "dataset_sha256", "option_set_version", "mocked", "sample"):
         if small_header.get(key) != large_header.get(key):
             raise SystemExit(f"The two results differ in {key}")
     combined = oracle(small, large)
@@ -481,7 +498,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--base-url", help="vLLM server, or the gateway's public proxy")
     p.add_argument("--mock", action="store_true", help="use the mock model")
-    p.add_argument("--limit", type=int, help="only the first N messages")
+    pick = p.add_mutually_exclusive_group()
+    pick.add_argument("--limit", type=int, help="only the first N messages")
+    pick.add_argument(
+        "--sample",
+        type=int,
+        help="N messages spread evenly over the intents (the files are sorted "
+        "by intent, so --limit covers only the first few)",
+    )
+    p.add_argument("--seed", type=int, default=6700, help="seed for --sample")
     p.add_argument("--concurrency", type=int, default=4)
     p.add_argument("--allow-remote", action="store_true")
 
