@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 from app_assignment_1.config import Settings
@@ -21,6 +22,7 @@ from app_assignment_1.labels import load_labels
 from app_assignment_1.router import MockJevRouter
 from app_assignment_1.schemas import BackendConfig, BackendReply
 from app_assignment_1.service import Gateway
+from app_assignment_1.vllm import BackendOutputError, BackendTimeoutError
 
 ROOT = Path(__file__).resolve().parents[1]
 LABELS = load_labels(ROOT / "config/labels.json")
@@ -63,7 +65,16 @@ def test_labelled_csv_accepts_labels_banking77_names_and_out_of_scope():
         parse_labelled_csv(b"text,intent\na,made_up\n", LABELS)
 
 
-def test_macro_f1_averages_over_the_77_intents():
+def test_labelled_csv_reads_excel_bom_and_names_bad_rows():
+    bom = "\ufefftext,intent\na,card_arrival\n".encode()
+    assert [m.gold for m in parse_labelled_csv(bom, LABELS)] == ["card_arrival"]
+    with pytest.raises(ValueError, match="no intent column"):
+        parse_labelled_csv(b"text,label\na,card_arrival\n", LABELS)
+    with pytest.raises(ValueError, match="Row 1 is missing a field"):
+        parse_labelled_csv(b"text,intent\na,card_arrival\nb\n", LABELS)
+
+
+def test_macro_f1_averages_over_the_intents_in_the_run():
     classes = gold_classes(LABELS)
     assert len(classes) == 77 and "unknown" not in classes
     items = [
@@ -76,8 +87,11 @@ def test_macro_f1_averages_over_the_77_intents():
     assert result["accuracy"] == 0.25
     assert result["errors"] == {"BackendTimeoutError": 1}
     assert result["predicted_unknown"] == 1
-    # card_arrival: precision 1/2, recall 1/2, F1 0.5; every other class 0.
-    assert result["macro_f1"] == pytest.approx(0.5 / 77)
+    # card_arrival: precision 1/2, recall 1/2, F1 0.5; age_limit: F1 0. The
+    # other 75 intents have no messages and no predictions, so they are left
+    # out, and `unknown` is never a class.
+    assert result["macro_f1_classes"] == 2
+    assert result["macro_f1"] == pytest.approx(0.25)
     assert result["per_class_recall"] == {"card_arrival": 0.5, "age_limit": 0.0}
     assert result["latency_ms_p50"] == 100.0
 
@@ -200,3 +214,157 @@ def test_runner_needs_a_key_for_a_real_model(tmp_path, monkeypatch):
         run_eval.main(["run", "--target", "small", "--base-url",
                        "http://10.0.0.1:8001", "--dataset-csv", str(data),
                        "--out", str(tmp_path / "s.jsonl")])  # fmt: skip
+
+
+def test_macro_f1_counts_a_predicted_intent_with_no_messages():
+    items = [
+        item(0, "card_arrival", "card_arrival"),
+        item(1, "card_arrival", "age_limit"),
+    ]
+    result = score(items, LABELS)
+    # card_arrival: precision 1, recall 1/2, F1 2/3; age_limit: F1 0.
+    assert result["macro_f1_classes"] == 2
+    assert result["macro_f1"] == pytest.approx(1 / 3)
+
+
+def flaky_call(failures):
+    """A call that raises the given exception the first time for each row."""
+    seen = set()
+
+    def make(backend, labels, cards):
+        async def call(message):
+            if message.row in failures and message.row not in seen:
+                seen.add(message.row)
+                raise failures[message.row]
+            return {
+                "latency_ms": 1.0,
+                "model": backend.config.name,
+                "format_ok": True,
+                "format_errors": [],
+                "predicted": message.gold,
+            }
+
+        return call
+
+    return make
+
+
+def write_csv(tmp_path, rows=3):
+    data = tmp_path / "fresh.csv"
+    golds = ["card_arrival", "age_limit", "atm_support"][:rows]
+    data.write_text(
+        "text,intent\n" + "".join(f"m{i},{g}\n" for i, g in enumerate(golds))
+    )
+    return data
+
+
+def test_resume_retries_harness_failures_and_keeps_model_failures(
+    tmp_path, monkeypatch, capsys
+):
+    run_eval = load_script()
+    failures = {0: BackendTimeoutError("t"), 1: BackendOutputError("o")}
+    monkeypatch.setattr(run_eval, "backend_call", flaky_call(failures))
+    data, out = write_csv(tmp_path), tmp_path / "small.jsonl"
+    args = ["run", "--target", "small", "--mock", "--dataset-csv", str(data),
+            "--out", str(out)]  # fmt: skip
+    assert run_eval.main(args) == 0
+    _, items = run_eval.read_results(out)
+    assert [(i["error"], i.get("final")) for i in items] == [
+        ("BackendTimeoutError", False),
+        ("BackendOutputError", True),
+        (None, None),
+    ]
+    assert all(i["model"] == "qwen3-1.7b" for i in items)
+    assert "1 failed calls to retry" in capsys.readouterr().out
+
+    # The rerun sends only the timed-out row; the model's bad output stays.
+    assert run_eval.main(args) == 0
+    _, items = run_eval.read_results(out)
+    assert [i["error"] for i in items] == [None, "BackendOutputError", None]
+    assert score(items, LABELS)["correct"] == 2
+
+
+def test_oracle_handles_a_row_that_failed_on_both_targets(
+    tmp_path, monkeypatch, capsys
+):
+    run_eval = load_script()
+    out = {t: tmp_path / f"{t}.jsonl" for t in ("small", "large")}
+    data = write_csv(tmp_path)
+    for target in out:
+        failures = {0: BackendOutputError("o")}
+        monkeypatch.setattr(run_eval, "backend_call", flaky_call(failures))
+        assert run_eval.main(["run", "--target", target, "--mock", "--dataset-csv",
+                              str(data), "--out", str(out[target])]) == 0  # fmt: skip
+    combined = tmp_path / "oracle.jsonl"
+    args = ["oracle", str(out["small"]), str(out["large"]), "--out", str(combined)]
+    assert run_eval.main(args) == 0
+    assert "large model on 0/3" in capsys.readouterr().out
+    header, items = run_eval.read_results(combined)
+    assert set(header["git_commit"]) == {"small", "large"}
+    assert items[0]["error"] == "BackendOutputError"
+
+
+def test_resume_after_a_cut_off_last_line(tmp_path):
+    run_eval = load_script()
+    data, out = write_csv(tmp_path), tmp_path / "small.jsonl"
+    args = ["run", "--target", "small", "--mock", "--dataset-csv", str(data),
+            "--out", str(out)]  # fmt: skip
+    assert run_eval.main([*args, "--limit", "2"]) == 0
+    lines = out.read_text().splitlines()
+    # Lose the last row and leave half a line, as a kill mid-write would.
+    out.write_text("\n".join(lines[:-1]) + "\n" + lines[-1][:40])
+    assert len(run_eval.read_results(out)[1]) == 1
+    assert run_eval.main(args) == 0
+    header, items = run_eval.read_results(out)
+    assert [i["row"] for i in items] == [0, 1, 2]
+    assert all(line.endswith("}") for line in out.read_text().splitlines())
+    # A broken line anywhere but the end is corruption, not a cut-off write.
+    out.write_text(out.read_text().replace('"type": "item"', "{", 1))
+    with pytest.raises(SystemExit, match="line 2 is not valid JSON"):
+        run_eval.read_results(out)
+
+
+def test_resume_refuses_a_different_commit(tmp_path, monkeypatch):
+    run_eval = load_script()
+    data, out = write_csv(tmp_path), tmp_path / "small.jsonl"
+    args = ["run", "--target", "small", "--mock", "--dataset-csv", str(data),
+            "--out", str(out)]  # fmt: skip
+    monkeypatch.setattr(run_eval, "git_commit", lambda: "aaa")
+    assert run_eval.main([*args, "--limit", "1"]) == 0
+    monkeypatch.setattr(run_eval, "git_commit", lambda: "bbb")
+    with pytest.raises(SystemExit, match="started at commit aaa"):
+        run_eval.main(args)
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "final"),
+    [
+        (503, "unavailable", True),
+        (422, "HTTP422", True),
+        (502, "HTTPStatusError", False),
+    ],
+)
+def test_gateway_error_statuses(status, code, final):
+    run_eval = load_script()
+
+    def handler(request):
+        return httpx.Response(status, json={"detail": "x"})
+
+    async def go():
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://t"
+        ) as client:
+            written = []
+            messages = [run_eval.Message(0, "hi", "card_arrival")]
+            await run_eval.run_items(
+                messages, run_eval.gateway_call(client), written.append, 1
+            )
+            return written[0]
+
+    result = asyncio.run(go())
+    assert (result["error"], result["final"], result["predicted"]) == (
+        code,
+        final,
+        None,
+    )

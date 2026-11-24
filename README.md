@@ -516,11 +516,16 @@ uv run python scripts/run_eval.py oracle eval/test-small.jsonl eval/test-large.j
 ```
 
 How it scores, following the integration plan:
-- **Accuracy and macro F1.** Macro F1 averages over the 77 Banking77 intents. A prediction of `unknown`, a failed call or a reply that fails the format check counts as wrong. A model called directly gets the gateway's format checks, so a failed check counts as the fallback apology a customer would see.
+- **Accuracy.** A failed call counts as wrong. A model called directly gets the gateway's format checks, so a reply that fails them counts as the fallback apology a customer would see, which carries `unknown`. `unknown` is wrong for a Banking77 message, and right only where the gold label is `unknown` (the fresh set has some).
+- **Macro F1** averages F1 over the Banking77 intents that appear in the run, as a gold label or a prediction (scikit-learn's default); `unknown` is never one of them. On the full official test set that is all 77. On `--limit`, the dev split or the fresh set, intents with no messages and no predictions are left out instead of adding a 0. `score --json` gives the count as `macro_f1_classes`.
 - **Per class:** `score --json` adds recall per intent. With 40 messages per intent in the official test set, one miss moves a class by 2.5 points.
 - Accuracy comes with a 95% Wilson interval, so small runs (`--limit`) show their uncertainty.
 
-Results are JSONL: a `run` line with the dataset's SHA-256, the target, the model, `option_set_version` and the git commit, then one line per message keyed by its row in the dataset. They hold **no message or reply text**. A stopped run continues when you rerun the same command; failed calls are retried.
+Results are JSONL: a `run` line with the dataset's SHA-256, the target, the model, `option_set_version` and the git commit, then one line per message keyed by its row in the dataset. They hold **no message or reply text**. A stopped run continues when you rerun the same command from the same git commit; a different commit is refused, so one file never mixes two versions of the code. A cut-off last line (after a kill or a full disk) is dropped and that message sent again.
+
+Failed calls come in two kinds, and both count as wrong:
+- **Kept**, because they are what a customer would have got: invalid output from the model (`BackendOutputError`), or an error status from the gateway (`unavailable` for a 503, `HTTP422` for a message it refuses). A rerun does not send these again.
+- **Retried**, because they are harness problems: timeouts, refused connections, a 502 from the proxy. `score` says how many are left; rerun the same command to retry them before reporting numbers.
 
 On the mock models, both score about 4% on the official test set: the mock matches keywords for 10 intents and answers `unknown` to the rest. That checks the runner, not the models. No real-model results yet.
 

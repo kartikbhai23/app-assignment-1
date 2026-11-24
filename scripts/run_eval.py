@@ -20,8 +20,15 @@ CSV with `text` and `intent` columns, such as the fresh set.
 
 Results are JSONL: one `run` line with the settings, then one `item` line per
 message, keyed by its row in the dataset. They hold no message text and no
-reply text. A run that stops can be started again with the same command; it
-skips the rows already in the file.
+reply text. A run that stops can be started again with the same command, from
+the same git commit; it skips the rows already in the file.
+
+Failed calls come in two kinds, and both count as wrong:
+- Final: what a customer would have got. Invalid output from the model
+  (`BackendOutputError`), or an error status from the gateway (`unavailable`
+  for a 503, `HTTP422` and so on). A rerun keeps these.
+- Retried: a problem with the harness, such as a timeout or a refused
+  connection. A rerun sends these messages again.
 
 The gateway target changes the stack it runs against (the monitor counts every
 reply, and requests are stored), so it refuses any host but localhost unless
@@ -61,7 +68,7 @@ from app_assignment_1.evaluation import (
 from app_assignment_1.intents import load_intents
 from app_assignment_1.labels import UNKNOWN, LabelSet, load_labels
 from app_assignment_1.schemas import BackendConfig, BackendReply, PolicyCard
-from app_assignment_1.vllm import VLLMBackend, build_system_prompt
+from app_assignment_1.vllm import BackendOutputError, VLLMBackend, build_system_prompt
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "config"
@@ -150,8 +157,8 @@ def gateway_call(client: httpx.AsyncClient) -> Call:
     async def call(message: Message) -> Item:
         start = time.perf_counter()
         response = await client.post("/v1/chat", json={"message": message.text})
-        if response.status_code == 503:
-            raise GatewayUnavailable
+        if response.status_code == 503 or 400 <= response.status_code < 500:
+            raise GatewayAnswered(response.status_code)
         response.raise_for_status()
         body = response.json()
         trace = body["trace"]
@@ -171,17 +178,43 @@ def gateway_call(client: httpx.AsyncClient) -> Call:
     return call
 
 
-class GatewayUnavailable(Exception):
-    """The gateway answered 503: no backend could answer."""
+class GatewayAnswered(Exception):
+    """The gateway answered with an error status: what the customer got.
+
+    A 503 means no backend could answer; a 4xx means it refused the message
+    (empty, or too long). Other 5xx come from the proxy or a crash and are
+    retried, like a refused connection."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(status)
+        self.code = "unavailable" if status == 503 else f"HTTP{status}"
+
+
+# Failures that belong to the system being measured, not to the harness. They
+# are kept as results; every other exception is retried on the next run.
+FINAL_ERRORS: tuple[type[Exception], ...] = (GatewayAnswered, BackendOutputError)
+
+
+def error_code(exc: Exception) -> str:
+    # The type or status only: provider messages can echo the input.
+    return exc.code if isinstance(exc, GatewayAnswered) else type(exc).__name__
 
 
 def read_results(path: Path) -> tuple[dict[str, Any], list[Item]]:
     header: dict[str, Any] | None = None
     items: dict[int, Item] = {}
-    for line in path.read_text().splitlines():
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for number, line in enumerate(lines, 1):
         if not line.strip():
             continue
-        record = json.loads(line)
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            if number == len(lines):
+                # Cut off by a kill or a full disk; a rerun sends that row again.
+                print(f"{path}: skipping a cut-off last line", file=sys.stderr)
+                continue
+            raise SystemExit(f"{path} line {number} is not valid JSON") from None
         if record["type"] == "run":
             header = header or record
         else:
@@ -196,6 +229,7 @@ async def run_items(
     call: Call,
     write: Callable[[Item], None],
     concurrency: int,
+    model: str | None = None,
 ) -> None:
     limit = asyncio.Semaphore(concurrency)
     done = 0
@@ -210,8 +244,12 @@ async def run_items(
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                # The type only: provider messages can echo the input.
-                item |= {"predicted": None, "error": type(exc).__name__}
+                item |= {
+                    "model": model,
+                    "predicted": None,
+                    "error": error_code(exc),
+                    "final": isinstance(exc, FINAL_ERRORS),
+                }
             write(item)
             done += 1
             if done % 100 == 0 or done == len(messages):
@@ -289,7 +327,16 @@ async def run(args: argparse.Namespace) -> int:
             raise SystemExit(
                 f"{out} holds a different run; use another --out to start a new one"
             )
-        done_rows = {item["row"] for item in items if item["error"] is None}
+        commit = git_commit()
+        if old.get("git_commit") != commit:
+            raise SystemExit(
+                f"{out} was started at commit {old.get('git_commit')}, and this "
+                f"checkout is at {commit}. Check out that commit to finish it, or "
+                "use another --out to start a new run."
+            )
+        done_rows = {
+            item["row"] for item in items if item["error"] is None or item.get("final")
+        }
     todo = [m for m in messages if m.row not in done_rows]
     print(
         f"{dataset.name}: {len(messages)} messages, {len(messages) - len(todo)} "
@@ -298,6 +345,11 @@ async def run(args: argparse.Namespace) -> int:
     )
 
     out.parent.mkdir(parents=True, exist_ok=True)
+    if out.exists():
+        body = out.read_bytes()
+        if body and not body.endswith(b"\n"):
+            # Drop the cut-off last line; its row is in `todo` and runs again.
+            out.write_bytes(body[: body.rfind(b"\n") + 1])
     with out.open("a", encoding="utf-8") as file:
         if not done_rows and out.stat().st_size == 0:
             header |= {
@@ -311,7 +363,8 @@ async def run(args: argparse.Namespace) -> int:
             file.flush()
 
         try:
-            await run_items(todo, call, write, args.concurrency)
+            model = None if args.target == "gateway" else header["model"]
+            await run_items(todo, call, write, args.concurrency, model)
         finally:
             if client is not None:
                 await client.aclose()
@@ -341,8 +394,12 @@ def print_scores(paths: list[Path]) -> None:
             f"  latency p50 {_fmt(result['latency_ms_p50'], 0)} ms  "
             f"p95 {_fmt(result['latency_ms_p95'], 0)} ms"
         )
-        if result["messages"] < header["dataset_size"]:
-            print("  incomplete: rerun the same command to finish it")
+        retry = sum(bool(i.get("error")) and not i.get("final") for i in items)
+        if result["messages"] < header["dataset_size"] or retry:
+            print(
+                f"  incomplete ({retry} failed calls to retry): rerun the same "
+                "command to finish it"
+            )
 
 
 def cmd_score(args: argparse.Namespace) -> int:
@@ -369,14 +426,26 @@ def cmd_oracle(args: argparse.Namespace) -> int:
             raise SystemExit(f"The two results differ in {key}")
     combined = oracle(small, large)
     result = score(combined, labels)
-    large_share = sum(item["model"] == large_header["model"] for item in combined)
+    large_share = sum(item.get("model") == large_header["model"] for item in combined)
     print(
         f"oracle over {small_header['model']} and {large_header['model']}: "
         f"accuracy {_fmt(result['accuracy'])}  macro F1 {_fmt(result['macro_f1'])}  "
         f"large model on {large_share}/{len(combined)} messages"
     )
+    retry = sum(bool(i.get("error")) and not i.get("final") for i in [*small, *large])
+    if retry:
+        print(f"  {retry} failed calls to retry: rerun both targets first")
     if args.out:
-        header = {**small_header, "target": "oracle", "model": "oracle"}
+        header = {
+            **small_header,
+            "target": "oracle",
+            "model": "oracle",
+            # The two runs can come from different commits; keep both.
+            "git_commit": {
+                "small": small_header.get("git_commit"),
+                "large": large_header.get("git_commit"),
+            },
+        }
         lines = [json.dumps(header)] + [json.dumps(item) for item in combined]
         args.out.write_text("\n".join(lines) + "\n")
     return 0

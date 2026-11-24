@@ -10,9 +10,14 @@ message's 0-based row in it, so the text can be looked up again from the
 pinned source.
 
 Scoring follows docs/JEV_QWEN_INTEGRATION_PLAN.md:
-- Intent accuracy and macro F1. Macro F1 averages over the 77 Banking77
-  intents (every label except `unknown`). A prediction of `unknown`, or a
-  failed call, counts as wrong for that message's gold class.
+- Intent accuracy and macro F1. A failed call counts as wrong. A prediction
+  of `unknown` is wrong for a Banking77 message, but right for accuracy on a
+  message whose gold label is `unknown` (the fresh set has some).
+- Macro F1 averages F1 over the Banking77 intents (every label except
+  `unknown`) that appear in the run, as a gold label or a prediction. On the
+  full official test set that is all 77. On a partial set (`--limit`, the dev
+  split, the fresh set), intents with no messages and no predictions are left
+  out instead of adding a 0. scikit-learn's default does the same.
 - Per-class recall, which is only worth reading where a class has enough
   messages (40 per intent in the official test set).
 """
@@ -63,6 +68,21 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _rows(
+    body: bytes, columns: tuple[str, ...]
+) -> Iterable[tuple[int, dict[str, str]]]:
+    """CSV rows, checked for the columns. Reads a byte order mark (Excel's
+    "CSV UTF-8") as part of the encoding, not the first column's name."""
+    reader = csv.DictReader(io.StringIO(body.decode("utf-8-sig")))
+    missing = [c for c in columns if c not in (reader.fieldnames or [])]
+    if missing:
+        raise ValueError(f"The CSV has no {', '.join(missing)} column")
+    for row, record in enumerate(reader):
+        if any(record[c] is None for c in columns):
+            raise ValueError(f"Row {row} is missing a field")
+        yield row, record
+
+
 def parse_banking77(body: bytes, labels: LabelSet) -> list[Message]:
     """Rows of a Banking77 CSV (`text,category`), mapped to our labels.
 
@@ -71,7 +91,7 @@ def parse_banking77(body: bytes, labels: LabelSet) -> list[Message]:
     """
     by_name = {item.banking77_name: item.label for item in labels.items}
     messages = []
-    for row, record in enumerate(csv.DictReader(io.StringIO(body.decode("utf-8")))):
+    for row, record in _rows(body, ("text", "category")):
         category = record["category"]
         if category not in by_name:
             raise ValueError(f"Row {row}: {category!r} is not a Banking77 intent")
@@ -87,7 +107,7 @@ def parse_labelled_csv(body: bytes, labels: LabelSet) -> list[Message]:
     """
     by_name = {item.banking77_name: item.label for item in labels.items}
     messages = []
-    for row, record in enumerate(csv.DictReader(io.StringIO(body.decode("utf-8")))):
+    for row, record in _rows(body, ("text", "intent")):
         intent = record["intent"].strip()
         if intent == "out_of_scope":
             intent = UNKNOWN
@@ -121,7 +141,7 @@ def reply_format_errors(
 
 
 def gold_classes(labels: LabelSet) -> list[str]:
-    """The 77 intents macro F1 averages over: every label except `unknown`."""
+    """The 77 Banking77 intents: every label except `unknown`."""
     return [item.label for item in labels.items if item.label != UNKNOWN]
 
 
@@ -148,7 +168,8 @@ def score(items: Sequence[dict[str, Any]], labels: LabelSet) -> dict[str, Any]:
 
     `predicted` is None for a failed call; it counts as wrong.
     """
-    classes = gold_classes(labels)
+    present = {item["gold"] for item in items} | {item["predicted"] for item in items}
+    classes = [label for label in gold_classes(labels) if label in present]
     n = len(items)
     correct = sum(item["predicted"] == item["gold"] for item in items)
     tp: Counter[str] = Counter()
@@ -182,6 +203,7 @@ def score(items: Sequence[dict[str, Any]], labels: LabelSet) -> dict[str, Any]:
         "accuracy": correct / n if n else None,
         "accuracy_95ci": [low, high],
         "macro_f1": statistics.fmean(f1.values()) if classes else None,
+        "macro_f1_classes": len(classes),
         "errors": dict(Counter(item["error"] for item in items if item.get("error"))),
         "format_failures": sum(item.get("format_ok") is False for item in items),
         "predicted_unknown": sum(item["predicted"] == UNKNOWN for item in items),
