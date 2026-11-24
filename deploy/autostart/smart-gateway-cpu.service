@@ -1,0 +1,28 @@
+# Starts the gateway stack (compose.yml) when the CPU instance boots,
+# including after an unshelve. Install it with the steps in the README,
+# "Start at boot"; they replace CHECKOUT_DIR with the checkout's path.
+#
+# Starting through Compose keeps depends_on (Postgres healthy before the
+# gateway) and --wait reports a stack that never gets healthy as a failure.
+# It does not build: it starts the images from the last deploy.
+[Unit]
+Description=Smart AI Gateway stack (compose.yml)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=15min
+StartLimitBurst=10
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=CHECKOUT_DIR
+ExecStartPre=/usr/bin/docker compose -p smart-gateway-prototype down
+ExecStart=/usr/bin/docker compose -p smart-gateway-prototype up -d --wait
+ExecStop=/usr/bin/docker compose -p smart-gateway-prototype down
+TimeoutStartSec=10min
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target

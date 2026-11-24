@@ -1,0 +1,32 @@
+# Starts the two vLLM servers (compose.gpu.yml) when the GPU host boots,
+# including after an unshelve. Install it with the steps in the README,
+# "Start at boot"; they replace CHECKOUT_DIR with the checkout's path.
+#
+# Docker restarts containers at boot by itself, but all at once and without
+# depends_on, so both servers claim GPU memory together and one can fail the
+# memory check. This unit stops them at shutdown and starts them in order at
+# boot: vllm-small, then vllm-large once vllm-small is healthy.
+[Unit]
+Description=Smart AI Gateway vLLM servers (compose.gpu.yml)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+# Up to 10 tries, 30 seconds apart, while the volume, network or GPU comes up.
+StartLimitIntervalSec=15min
+StartLimitBurst=10
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=CHECKOUT_DIR
+ExecStartPre=CHECKOUT_DIR/deploy/autostart/gpu-preflight.sh
+ExecStartPre=/usr/bin/docker compose -f compose.gpu.yml --env-file env/gpu.env -p smart-gateway-gpu down
+ExecStart=/usr/bin/docker compose -f compose.gpu.yml --env-file env/gpu.env -p smart-gateway-gpu up -d --wait
+ExecStop=/usr/bin/docker compose -f compose.gpu.yml --env-file env/gpu.env -p smart-gateway-gpu down
+# Loading both models from the cache takes a few minutes.
+TimeoutStartSec=30min
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target

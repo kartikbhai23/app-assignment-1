@@ -409,6 +409,8 @@ docker compose -p smart-gateway-prototype up -d --build --wait
 
 Allow inbound TCP **8080** in the instance's security group and host firewall. Keep the existing SSH access rule. Do not publish the gateway or database ports. If 8080 is already occupied, identify that service before stopping anything.
 
+To have the stack come back by itself after the instance is shelved and unshelved, install the [start-at-boot unit](#start-at-boot).
+
 Back on your laptop, verify external access:
 
 ```bash
@@ -445,8 +447,8 @@ Both run vLLM `v0.33.0` (image pinned by digest) with `--max-model-len 4096` on 
 
 ```bash
 git clone --branch main --single-branch \
-  https://github.com/sv642-hub/app-assignment-1.git smart-ai-gateway-prototype
-cd smart-ai-gateway-prototype
+  https://github.com/sv642-hub/app-assignment-1.git ~/app-assignment-1
+cd ~/app-assignment-1
 cp env/gpu.env.example env/gpu.env   # set VLLM_BIND_IP (ip -4 addr) and MODEL_CACHE_DIR (the attached volume)
 sed -i "s/^VLLM_API_KEY=$/VLLM_API_KEY=$(openssl rand -hex 32)/" env/gpu.env
 docker compose -f compose.gpu.yml --env-file env/gpu.env -p smart-gateway-gpu up -d --wait
@@ -458,17 +460,17 @@ The first start downloads both models (about 12 GB) into `MODEL_CACHE_DIR`, whic
 
 After the first download, set `HF_HUB_OFFLINE=1` in `env/gpu.env` so later starts never contact Hugging Face.
 
-The memory margin is tiny: `vllm-large` starts with about 0.02 GiB to spare. If one container restarts while the other is running, its memory check can fail. Restart both together with `down` and then `up -d --wait`, not one at a time. The containers also do not come back by themselves after the instance is shelved and unshelved; run the same `up -d --wait` command.
+The memory margin is tiny: `vllm-large` starts with about 0.02 GiB to spare. If one container restarts while the other is running, its memory check can fail. Restart both together with `down` and then `up -d --wait`, not one at a time. Docker's own restart at boot starts both at once, so after an unshelve they may not come back; install the [start-at-boot unit](#start-at-boot) so they start in order.
 
 **Share the key with the CPU instance.** The key lives in two places only: `env/gpu.env` on the GPU host, and `~/.vllm_api_key` on the CPU instance (readable only by `exouser`). Copy it from your laptop; it goes straight from one host to the other and never shows on screen:
 
 ```bash
-ssh exouser@GPU_PUBLIC_IP 'sed -n "s/^VLLM_API_KEY=//p" ~/GPU_CHECKOUT/env/gpu.env' \
+ssh exouser@GPU_PUBLIC_IP 'sed -n "s/^VLLM_API_KEY=//p" ~/app-assignment-1/env/gpu.env' \
   | ssh exouser@CPU_PUBLIC_IP 'umask 077; cat > ~/.vllm_api_key'
 ssh exouser@CPU_PUBLIC_IP 'wc -c < ~/.vllm_api_key'   # 65: 64 characters and a newline
 ```
 
-`GPU_CHECKOUT` is the folder you cloned into on the GPU host. Do not send the key through GitHub, team chat or email. To change it, set a new `VLLM_API_KEY` in `env/gpu.env`, restart both servers (`down`, then `up -d --wait`) and copy it again.
+Change `~/app-assignment-1` if you cloned somewhere else. Do not send the key through GitHub, team chat or email. To change it, set a new `VLLM_API_KEY` in `env/gpu.env`, restart both servers (`down`, then `up -d --wait`) and copy it again.
 
 **Check from the CPU instance**, in a checkout with `uv sync --extra dev --frozen`:
 
@@ -491,7 +493,50 @@ curl --max-time 5 http://GPU_PUBLIC_IP:8001/health
 docker compose -f compose.gpu.yml --env-file env/gpu.env -p smart-gateway-gpu down
 ```
 
-`down` leaves `MODEL_CACHE_DIR` alone, so the next start skips the download.
+`down` leaves `MODEL_CACHE_DIR` alone, so the next start skips the download. With the start-at-boot unit installed, use `sudo systemctl stop smart-gateway-gpu` instead; it runs the same `down`.
+
+## Start at boot
+
+Both instances get shelved to save allocation. A systemd unit on each starts its Compose stack when the instance boots, including after an unshelve, so nobody has to SSH in first. The units are in [`deploy/autostart/`](deploy/autostart/).
+
+| Instance | Unit | What it starts |
+| --- | --- | --- |
+| CPU | `smart-gateway-cpu.service` | `compose.yml` as project `smart-gateway-prototype`, from the images of the last deploy (no build) |
+| GPU | `smart-gateway-gpu.service` | `compose.gpu.yml` as project `smart-gateway-gpu`, `vllm-small` first, then `vllm-large` |
+
+Each unit runs `down` and then `up -d --wait`, so Compose starts the services in order and waits until they are healthy. That matters most on the GPU host. Docker restarts containers at boot by itself, but all at once and ignoring `depends_on`, so both vLLM servers would claim GPU memory together. Before starting, the GPU unit runs [`gpu-preflight.sh`](deploy/autostart/gpu-preflight.sh), which checks three things:
+- `VLLM_BIND_IP` is still this host's address
+- `MODEL_CACHE_DIR` holds the weights, so the volume is mounted
+- `nvidia-smi` sees the GPU
+
+If any of these is not ready, the unit tries again every 30 seconds, up to 10 times. Each unit also runs `down` at shutdown.
+
+**Install**, once per instance, from its checkout. Starting the unit restarts that stack once: a few seconds on the CPU instance, a few minutes on the GPU host while the models load.
+
+```bash
+# CPU instance, in ~/smart-ai-gateway-prototype
+sed "s|CHECKOUT_DIR|$PWD|g" deploy/autostart/smart-gateway-cpu.service \
+  | sudo tee /etc/systemd/system/smart-gateway-cpu.service >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl enable --now smart-gateway-cpu
+
+# GPU instance, in ~/app-assignment-1
+sed "s|CHECKOUT_DIR|$PWD|g" deploy/autostart/smart-gateway-gpu.service \
+  | sudo tee /etc/systemd/system/smart-gateway-gpu.service >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl enable --now smart-gateway-gpu
+```
+
+**Check** after an install or an unshelve. `active (exited)` means the stack is up and healthy.
+
+```bash
+systemctl status smart-gateway-gpu --no-pager      # or smart-gateway-cpu
+journalctl -u smart-gateway-gpu -b --no-pager      # what happened at this boot
+```
+
+If the unit failed, the log names the reason, for example `VLLM_BIND_IP=... is not an address of this host`. Fix it, then run `sudo systemctl restart smart-gateway-gpu`.
+
+Deploying an update does not change: `git pull` and `docker compose -p smart-gateway-prototype up -d --build --wait` as above. The next boot starts the newly built images. To stop a stack until the next boot, run `sudo systemctl stop smart-gateway-cpu` (or `-gpu`). To stop it starting at boot, run `sudo systemctl disable smart-gateway-cpu`.
 
 ## Tests and project layout
 
