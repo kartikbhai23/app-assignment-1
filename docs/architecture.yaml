@@ -222,8 +222,9 @@ components:
     title: Offline evaluation harness
     owner: "Pavlos: runner · Yanzhen: accuracy · Eric: dev split · everyone: data"
     items:
-      - todo: Official test set primary; fresh set as a check
-      - todo: Baselines and the oracle router
+      - built: Runner over the official test set or any CSV
+      - built: Always-small, always-large, gateway and oracle
+      - todo: Results on the real models; fresh set as a check
       - todo: 300 messages, 150 grades; split not agreed
       - todo: Banking77 development split
 

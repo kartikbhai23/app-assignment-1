@@ -20,6 +20,7 @@ Smart AI Gateway (DSAN 6700 final project): a FastAPI gateway that routes bankin
 - `src/app_assignment_1/intents.py`: keyword matching over the configured intents, shared by the mocks.
 - `src/app_assignment_1/labels.py`: loads the shared labels (77 Banking77 intents plus `unknown`) and derives `option_set_version`.
 - `src/app_assignment_1/monitor.py`: in-memory failure monitor (format failures and failed calls) and `Controller`; new interventions wait in `unsaved` until the gateway stores them.
+- `src/app_assignment_1/evaluation.py`: offline evaluation: loads the official Banking77 test set (pinned download) or a `text,intent` CSV, mirrors the gateway's format checks, scores accuracy and macro F1 over the 77 intents, and builds the oracle router from the small and large results.
 - `src/app_assignment_1/probe.py`: offline linear probe skeleton and gate check; not used by the gateway. See `docs/PROBE.md`.
 - `src/app_assignment_1/records.py`: `JevAssessment` records for the semantic monitor and the checks on them. The gateway builds two records per request and saves them with the request through `Store`.
 - `src/app_assignment_1/semantic.py`: in-memory semantic monitor; scores each model's intent against Jev's intent answer, per model, with coverage and a baseline; only when Jev and the model are both mocks or both real (`Backend.mocked`). The controller acts on it only with `APP_SEMANTIC_ACTIONS_ENABLED` (off by default).
@@ -31,6 +32,7 @@ Smart AI Gateway (DSAN 6700 final project): a FastAPI gateway that routes bankin
 - `config/`: `labels.json` (the 78 labels Jev and Qwen classify into), `intents.json`, `policy_cards.json`, `backends.json`, plus `backends.chaos.json`, `backends.outage.json` and `backends.labelswap.json` for simulated faults.
 - `tests/`: pytest suite. Frontend tests are in `frontend/src/App.test.jsx`.
 - `scripts/smoke_compose.py`: smoke test against the public proxy.
+- `scripts/run_eval.py`: the evaluation runner. `run` sends each message to one target (`small` or `large` directly, real vLLM or `--mock`, or `gateway` through `/v1/chat` on a local stack) and writes JSONL with no message or reply text; `score` and `oracle` read those files. Downloads go to `data/cache/`, which git ignores.
 - `scripts/probe_false_pass.py`: simulates how often the probe gate passes with no signal (see `docs/PROBE.md`).
 - `scripts/jev_live_check.py`: the B6 live Jev check, run by hand with a TypeSafe key. `sample` draws messages from the Banking77 training split, `run` calls Jev once per message, and `summarize` prints the measurements. Its logs keep no message text.
 - `scripts/render_architecture.py`: draws `docs/architecture.svg` from `docs/architecture.yaml`; `--check` fails if they differ.
@@ -77,6 +79,10 @@ uv run python scripts/render_architecture.py
 
 # Smoke test the running stack
 python3 scripts/smoke_compose.py http://localhost:8080
+
+# Evaluation on the mocks (see README, Offline evaluation, for the real models)
+uv run python scripts/run_eval.py run --target small --mock --out eval/mock-small.jsonl
+uv run python scripts/run_eval.py score eval/mock-small.jsonl
 
 # Chaos mode, a simulated outage or a label swap, then back to normal
 docker compose -f compose.yml -f compose.chaos.yml up -d --build --wait

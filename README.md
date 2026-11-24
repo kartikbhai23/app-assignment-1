@@ -417,6 +417,37 @@ curl -fsS http://YOUR_INSTANCE_IP:8080/v1/chat \
 
 Open `http://YOUR_INSTANCE_IP:8080` and send a chat message. Leave Compose running for grading. Local verification does not confirm instance deployment or external reachability.
 
+## Offline evaluation
+
+[`scripts/run_eval.py`](scripts/run_eval.py) measures intent accuracy on a fixed set of messages. The primary set is the official [Banking77](https://github.com/PolyAI-LDN/task-specific-datasets) test set (3,080 messages, 40 per intent; PolyAI, CC BY 4.0). The script downloads it at a pinned commit, checks its SHA-256 and caches it in `data/cache/`. `--dataset-csv` takes any CSV with `text` and `intent` columns instead, such as the fresh set once it exists.
+
+Targets:
+
+| Target | What it measures |
+| --- | --- |
+| `small`, `large` | One model called directly: the always-small and always-large baselines. Real vLLM with `--base-url` and `VLLM_API_KEY`, or `--mock` |
+| `gateway` | The whole system through `POST /v1/chat`: routing, fallbacks and format checks. Only a stack you run yourself; it refuses other hosts unless `--allow-remote` |
+| `oracle` | Worked out from the small and large results, with no calls: the large model only where it is right and the small model is wrong. The best any router over these two models could do |
+
+On the real models, from the CPU instance (the GPU servers accept no other host):
+
+```bash
+export VLLM_API_KEY=$(cat ~/.vllm_api_key)
+uv run python scripts/run_eval.py run --target small --base-url http://GPU_PRIVATE_IP:8001 --out eval/test-small.jsonl
+uv run python scripts/run_eval.py run --target large --base-url http://GPU_PRIVATE_IP:8002 --out eval/test-large.jsonl
+uv run python scripts/run_eval.py score eval/test-small.jsonl eval/test-large.jsonl
+uv run python scripts/run_eval.py oracle eval/test-small.jsonl eval/test-large.jsonl
+```
+
+How it scores, following the integration plan:
+- **Accuracy and macro F1.** Macro F1 averages over the 77 Banking77 intents. A prediction of `unknown`, a failed call or a reply that fails the format check counts as wrong. A model called directly gets the gateway's format checks, so a failed check counts as the fallback apology a customer would see.
+- **Per class:** `score --json` adds recall per intent. With 40 messages per intent in the official test set, one miss moves a class by 2.5 points.
+- Accuracy comes with a 95% Wilson interval, so small runs (`--limit`) show their uncertainty.
+
+Results are JSONL: a `run` line with the dataset's SHA-256, the target, the model, `option_set_version` and the git commit, then one line per message keyed by its row in the dataset. They hold **no message or reply text**. A stopped run continues when you rerun the same command; failed calls are retried.
+
+On the mock models, both score about 4% on the official test set: the mock matches keywords for 10 intents and answers `unknown` to the rest. That checks the runner, not the models. No real-model results yet.
+
 ## Tests and project layout
 
 ```bash
