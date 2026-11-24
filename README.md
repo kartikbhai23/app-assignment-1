@@ -460,10 +460,20 @@ After the first download, set `HF_HUB_OFFLINE=1` in `env/gpu.env` so later start
 
 The memory margin is tiny: `vllm-large` starts with about 0.02 GiB to spare. If one container restarts while the other is running, its memory check can fail. Restart both together with `down` and then `up -d --wait`, not one at a time. The containers also do not come back by themselves after the instance is shelved and unshelved; run the same `up -d --wait` command.
 
-**Check from the CPU instance**, in a checkout with `uv sync --extra dev --frozen`. Copy the key from `env/gpu.env` on the GPU host; do not save it in shell history files or the repo:
+**Share the key with the CPU instance.** The key lives in two places only: `env/gpu.env` on the GPU host, and `~/.vllm_api_key` on the CPU instance (readable only by `exouser`). Copy it from your laptop; it goes straight from one host to the other and never shows on screen:
 
 ```bash
-read -rs VLLM_API_KEY && export VLLM_API_KEY   # paste the key, then Enter
+ssh exouser@GPU_PUBLIC_IP 'sed -n "s/^VLLM_API_KEY=//p" ~/GPU_CHECKOUT/env/gpu.env' \
+  | ssh exouser@CPU_PUBLIC_IP 'umask 077; cat > ~/.vllm_api_key'
+ssh exouser@CPU_PUBLIC_IP 'wc -c < ~/.vllm_api_key'   # 65: 64 characters and a newline
+```
+
+`GPU_CHECKOUT` is the folder you cloned into on the GPU host. Do not send the key through GitHub, team chat or email. To change it, set a new `VLLM_API_KEY` in `env/gpu.env`, restart both servers (`down`, then `up -d --wait`) and copy it again.
+
+**Check from the CPU instance**, in a checkout with `uv sync --extra dev --frozen`:
+
+```bash
+export VLLM_API_KEY=$(cat ~/.vllm_api_key)
 curl -fsS -H "Authorization: Bearer $VLLM_API_KEY" http://GPU_PRIVATE_IP:8001/v1/models
 uv run python scripts/smoke_vllm.py --route standard --base-url http://GPU_PRIVATE_IP:8001 --model qwen3-1.7b
 uv run python scripts/smoke_vllm.py --route complex  --base-url http://GPU_PRIVATE_IP:8002 --model qwen3-4b

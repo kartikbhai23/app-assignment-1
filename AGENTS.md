@@ -94,6 +94,7 @@ docker compose down
 - Work on a branch and open a pull request; never push to main.
 - Run the tests and pre-commit before committing; keep CI green.
 - Only port 8080 (Caddy) is published. Never publish gateway, database, Prometheus or vLLM ports. The one exception is vLLM on the GPU host (`compose.gpu.yml`): it binds only to that host's private IP, so only the CPU instance can reach it. Never bind it to 0.0.0.0 or the public IP.
+- The vLLM API key lives only in `env/gpu.env` on the GPU host and `~/.vllm_api_key` on the CPU instance. Never commit it, print it, or ask anyone to paste it into a PR, issue or chat; to use it, run `export VLLM_API_KEY=$(cat ~/.vllm_api_key)` on the CPU instance.
 - Settings come from Pydantic Settings and env/ files. Never commit secrets or a real .env. Only `APP_` keys belong in `env/.env`; the Postgres container's password goes in `env/postgres.env`.
 - Never store the customer's message text. `ChatResponse` has no message field; keep it that way.
 - Mocks sit behind interfaces (router, backends). Replace them by adding a real implementation, not by editing callers.
