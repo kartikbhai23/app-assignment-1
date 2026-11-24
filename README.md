@@ -62,27 +62,30 @@ Send five standard messages. Each one is still answered, by `qwen3-4b` with `fal
 3. sends one message every 0.5 s (three standard, then one complex) until the controller disables the model, then 4 more;
 4. clears the fault and keeps sending until the small model answers its own route again.
 
-It needs an operator token, and it changes the running models, so it refuses any host but localhost unless you pass `--allow-remote`. Never run it on the deployment testers use. Set `APP_OPERATOR_TOKEN` in `env/.env` first, then:
+It needs an operator token, and it changes the running models, so it refuses any host but localhost unless you pass `--allow-remote`. Never run it on the deployment testers use. Set `APP_OPERATOR_TOKEN` in `env/.env` first, then pass the same value to the script (it runs on Python 3.9 or later):
 
 ```bash
 docker compose -f compose.yml -f compose.measure.yml up -d --build --wait
-OPERATOR_TOKEN='your-operator-token' python3 scripts/measure_recovery.py --runs 3 --out recovery.json
+APP_OPERATOR_TOKEN='your-operator-token' python3 scripts/measure_recovery.py --runs 3 --out recovery.json
 ```
 
 [`compose.measure.yml`](compose.measure.yml) turns semantic actions on with the mock baseline of 0, so the label-swap scenario can run. `--out` saves every reply's trace fields and the results as JSON.
 
 Measured on November 23, 2026, on a laptop with the mock models, the default settings and 3 runs per fault:
 
-| Fault | Time to disable | Standard requests until disabled | Bad replies to customers before that | 503s | False interventions | Time until the model serves again | Median latency, normal → during the fault |
+| Fault | Time to disable | Standard requests until disabled | Bad replies to customers before that | 503s | False interventions | Time until the model serves again | Median latency: normal / fault until the disable / after the disable |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `outage` | 6.3–8.3 s | 6–7 | 0 | 0 | 0 | 55.7–56.5 s | 126 → 474 ms |
-| `bad_format` | 5.8 s | 7 | 7 | 0 | 0 | 56.4–56.6 s | 126 → 131 ms |
-| `label_swap` | 1.4 s | 3 | 3 | 0 | 0 | 56.2 s | 124 → 351 ms |
+| `outage` | 6.3–8.3 s | 6–7 | 0 | 0 | 0 | 55.7–56.5 s | 121 / 471 / 351 ms |
+| `bad_format` | 5.8 s | 7 | 7 | 0 | 0 | 56.4–56.6 s | 121 / 121 / 351 ms |
+| `label_swap` | 1.4 s | 3 | 3 | 0 | 0 | 56.2 s | 121 / 121 / 351 ms |
+
+The latency column comes from a second run on November 24, 2026, after the script began reporting latency before and after the disable separately: 3 runs per fault in a cloud container, with the gateway run by uvicorn and the in-memory store instead of Compose. In that run the request and bad-reply counts were the same as above, and the times were within 0.5 s.
 
 How to read it:
 - **The controller counts requests, not seconds.** The times above follow from one message every 0.5 s. With other traffic, the request counts are what carry over.
 - **How fast it acts depends on the healthy calls already in the window.** Each run starts with about 7 healthy calls, so it takes 7 failures to reach 50%. With a full window of 20 healthy calls it would take 10. `label_swap` was fast because a re-enable clears the semantic window. Its 3 wrong intents out of 10 scored replies were above the 0 baseline plus the 0.15 margin. With 50 healthy samples in the window it would take 8.
 - **During an outage, customers got no bad replies or 503s,** but each request waited for the failed call before the large model answered. That's the higher latency until the disable.
+- **After the disable, the large model answers the small model's route.** The mock large model is slower (about 350 ms), so the latency after the disable shows the reroute, not a slower small model.
 - **The time until the model serves again is the rest of the 60 s cooldown.** The gateway doesn't notice that a fault is fixed; it tries the model again when the cooldown ends.
 - **"No false interventions" covers 72 normal requests only.** That's too few to say anything about a false intervention rate.
 

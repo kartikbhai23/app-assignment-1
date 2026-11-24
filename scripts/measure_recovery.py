@@ -21,13 +21,15 @@ Usage, from the repo root, with the stack started with an operator token in
 env/.env (APP_OPERATOR_TOKEN) and, for label_swap, compose.measure.yml:
 
     docker compose -f compose.yml -f compose.measure.yml up -d --build --wait
-    OPERATOR_TOKEN=... python3 scripts/measure_recovery.py --out recovery.json
+    APP_OPERATOR_TOKEN=... python3 scripts/measure_recovery.py --out recovery.json
 
 It changes the running gateway's models, so it refuses any host but localhost
 unless --allow-remote is given. Never run it on the deployment testers use.
 The times depend on the settings (shown at the start) and on the mock models'
 simulated latency; they say nothing about real models.
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -118,7 +120,10 @@ class Result:
     restored: bool = False
     restore_seconds: float | None = None
     latency_ms_normal: float | None = None
+    # Fault phase up to and including the request that disabled the model,
+    # then the requests after it (answered by the large model).
     latency_ms_fault: float | None = None
+    latency_ms_after_disable: float | None = None
     replies: list[Reply] = field(default_factory=list)
 
 
@@ -131,10 +136,12 @@ def summarize(scenario: str, replies: list[Reply], fault_at: float) -> Result:
     result.false_interventions = sum(r.controller_action is not None for r in normal)
     result.unavailable = sum(r.status != 200 for r in fault + cleared)
     detect = next((r for r in fault if r.disabled_small), None)
+    before, after = fault, []
     if detect is not None:
         result.detected = True
         result.detect_seconds = round(detect.at - fault_at, 2)
         before = fault[: fault.index(detect) + 1]
+        after = fault[fault.index(detect) + 1 :]
         result.requests_to_detect = sum(r.route == "standard" for r in before)
         result.bad_replies_before_detect = sum(not r.good for r in before)
     if cleared:
@@ -145,7 +152,8 @@ def summarize(scenario: str, replies: list[Reply], fault_at: float) -> Result:
             # From the first request after the fault was cleared.
             result.restore_seconds = round(back.at - result.cleared_at, 2)
     result.latency_ms_normal = _median(normal)
-    result.latency_ms_fault = _median(fault)
+    result.latency_ms_fault = _median(before)
+    result.latency_ms_after_disable = _median(after)
     return result
 
 
@@ -180,8 +188,8 @@ class Gateway:
         )
         if status != 200:
             raise RuntimeError(
-                f"/v1/faults answered {status}: {body}. Set APP_OPERATOR_TOKEN on "
-                "the gateway and OPERATOR_TOKEN here."
+                f"/v1/faults answered {status}: {body}. Set APP_OPERATOR_TOKEN, "
+                "the same value, on the gateway and here."
             )
 
     def chat(self, phase: str, start: float, clock: Callable[[], float]) -> Reply:
@@ -295,7 +303,7 @@ def print_report(results: list[Result], health: dict[str, Any]) -> None:
     )
     header = (
         "scenario     detect_s  requests  bad_replies  503s  false  restore_s  "
-        "p50_ms normal/fault"
+        "p50_ms normal/fault/after"
     )
     print(header)
     for r in results:
@@ -304,7 +312,8 @@ def print_report(results: list[Result], health: dict[str, Any]) -> None:
             f"{_cell(r.requests_to_detect):>8}  {r.bad_replies_before_detect:>11}  "
             f"{r.unavailable:>4}  {r.false_interventions:>5}  "
             f"{_cell(r.restore_seconds):>9}  "
-            f"{_cell(r.latency_ms_normal)}/{_cell(r.latency_ms_fault)}"
+            f"{_cell(r.latency_ms_normal)}/{_cell(r.latency_ms_fault)}/"
+            f"{_cell(r.latency_ms_after_disable)}"
         )
 
 
@@ -329,7 +338,9 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    gateway = Gateway(http_transport(args.base_url), os.environ.get("OPERATOR_TOKEN"))
+    gateway = Gateway(
+        http_transport(args.base_url), os.environ.get("APP_OPERATOR_TOKEN")
+    )
     health = gateway.health()
     scenarios = args.scenario or list(SCENARIOS)
     results: list[Result] = []

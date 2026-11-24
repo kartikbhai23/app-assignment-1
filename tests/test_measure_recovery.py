@@ -3,6 +3,7 @@ end to end against the app in process, with a 1-second cooldown."""
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -21,6 +22,8 @@ def load() -> ModuleType:
     spec = importlib.util.spec_from_file_location("measure_recovery", SCRIPT)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    # dataclasses look the module up here to resolve postponed annotations.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -79,7 +82,7 @@ def test_summarize():
             intent="unknown",
             controller_action=disabled,
         ),
-        reply(2.5, "fault", model=mr.LARGE),
+        reply(2.5, "fault", model=mr.LARGE, latency_ms=40.0),
         reply(3.0, "cleared", model=mr.LARGE),
         reply(3.5, "cleared", status=503, model=None, intent=None, format_check=None),
         reply(5.0, "cleared"),
@@ -95,7 +98,9 @@ def test_summarize():
     assert result.restored
     assert result.restore_seconds == 2.0
     assert result.latency_ms_normal == 10.0
+    # Up to and including the disable; the reply after it is reported apart.
     assert result.latency_ms_fault == 10.0
+    assert result.latency_ms_after_disable == 40.0
 
 
 def test_a_controller_action_before_the_fault_is_a_false_intervention():
