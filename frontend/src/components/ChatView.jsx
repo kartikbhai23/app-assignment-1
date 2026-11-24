@@ -10,6 +10,7 @@ export const EXAMPLES = [
   "Tell me about the weather",
 ];
 const MAX_CHARS = 2000;
+const limitMessage = (text) => Array.from(text).slice(0, MAX_CHARS).join("");
 const DRAFT_KEY = "gateway.chat.draft";
 const TURNS_KEY = "gateway.chat.turns";
 
@@ -28,10 +29,14 @@ export function readSaved(key, fallback) {
 export function writeSaved(key, value) {
   try {
     if (value === null || (Array.isArray(value) && value.length === 0) || value === "") {
-      window.sessionStorage.removeItem(key);
-    } else {
-      window.sessionStorage.setItem(key, JSON.stringify(value));
+      try {
+        window.sessionStorage.removeItem(key);
+        return;
+      } catch {
+        // If deletion is blocked but writing works, overwrite the old chat.
+      }
     }
+    window.sessionStorage.setItem(key, JSON.stringify(value));
   } catch {
     // Storage is full or blocked: keep working without it.
   }
@@ -41,32 +46,37 @@ export function writeSaved(key, value) {
 // the shape and drop it if it does not, so a bad key cannot crash every refresh.
 export function readSavedDraft() {
   const draft = readSaved(DRAFT_KEY, "");
-  if (typeof draft === "string") return draft;
-  writeSaved(DRAFT_KEY, "");
-  return "";
+  return typeof draft === "string" ? limitMessage(draft) : "";
 }
 
 function validTurn(t) {
-  if (!t || typeof t !== "object" || !Number.isInteger(t.id) || typeof t.message !== "string") return false;
+  if (!t || typeof t !== "object" || !Number.isSafeInteger(t.id) || t.id < 0 || typeof t.message !== "string") return false;
   if (t.status === "pending") return true;
   if (t.status === "error") return typeof t.error === "string";
   if (t.status !== "done") return false;
   const r = t.result;
+  const trace = r?.trace;
   return (
-    !!r &&
-    typeof r.reply === "string" &&
+    typeof r?.reply === "string" &&
+    typeof r.id === "string" &&
+    typeof r.intent === "string" &&
     Array.isArray(r.policy_facts) &&
-    !!r.trace &&
-    typeof r.trace === "object" &&
-    Array.isArray(r.trace.format_errors)
+    r.policy_facts.every((fact) => typeof fact === "string") &&
+    (trace?.route === "standard" || trace?.route === "complex") &&
+    typeof trace.router === "string" &&
+    typeof trace.reply_source === "string" &&
+    (trace.format_check === "passed" || trace.format_check === "failed") &&
+    Array.isArray(trace.format_errors) &&
+    trace.format_errors.every((error) => typeof error === "string") &&
+    (trace.fallback_reason == null || typeof trace.fallback_reason === "string") &&
+    (trace.controller_action == null || typeof trace.controller_action === "string") &&
+    (trace.confidence == null || typeof trace.confidence === "number")
   );
 }
 
 export function readSavedTurns() {
   const saved = readSaved(TURNS_KEY, []);
-  if (Array.isArray(saved) && saved.every(validTurn)) return saved;
-  writeSaved(TURNS_KEY, []);
-  return [];
+  return Array.isArray(saved) && saved.every(validTurn) ? saved : [];
 }
 
 export { DRAFT_KEY, TURNS_KEY };
@@ -163,15 +173,12 @@ function Turn({ turn }) {
   );
 }
 
-export default function ChatView({ turns, onSend }) {
-  const [message, setMessage] = useState(readSavedDraft);
+export default function ChatView({ turns, message, setMessage, onSend }) {
   const endRef = useRef(null);
   const busy = turns.some((t) => t.status === "pending");
   const canSend = !busy && message.trim().length > 0;
 
-  useEffect(() => {
-    writeSaved(DRAFT_KEY, message);
-  }, [message]);
+  const characterCount = Array.from(message).length;
 
   useEffect(() => {
     if (turns.length) endRef.current?.scrollIntoView?.({ block: "end" });
@@ -179,7 +186,7 @@ export default function ChatView({ turns, onSend }) {
 
   const submit = (text) => {
     const clean = text.trim();
-    if (!clean || busy) return;
+    if (!clean || busy || Array.from(clean).length > MAX_CHARS) return;
     onSend(clean);
     setMessage("");
   };
@@ -231,9 +238,8 @@ export default function ChatView({ turns, onSend }) {
               id="message"
               rows={1}
               value={message}
-              maxLength={MAX_CHARS}
               placeholder="Message DemoBank support…"
-              onChange={(event) => setMessage(event.target.value)}
+              onChange={(event) => setMessage(limitMessage(event.target.value))}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
@@ -254,9 +260,8 @@ export default function ChatView({ turns, onSend }) {
               </svg>
             </button>
           </div>
-          {/* Counts UTF-16 units like the textarea's maxLength, so it is never looser than the server. */}
-          <p className={`counter${message.length >= MAX_CHARS ? " counter-full" : ""}`}>
-            {message.length} / {MAX_CHARS} characters
+          <p className={`counter${characterCount >= MAX_CHARS ? " counter-full" : ""}`}>
+            {characterCount} / {MAX_CHARS} characters
           </p>
           <p className="footnote">
             Fictional bank demo. Each message is routed on its own, so ask one question at a time; the gateway keeps no

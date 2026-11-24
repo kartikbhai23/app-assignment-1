@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { GatewayError, getHealth, sendChat } from "./api.js";
-import ChatView, { DRAFT_KEY, TURNS_KEY, readSavedTurns, writeSaved } from "./components/ChatView.jsx";
+import ChatView, { DRAFT_KEY, TURNS_KEY, readSavedDraft, readSavedTurns, writeSaved } from "./components/ChatView.jsx";
 import HealthView from "./components/HealthView.jsx";
 import Sidebar from "./components/Sidebar.jsx";
 
@@ -15,16 +15,18 @@ function viewFromHash() {
 
 // A reply that was still pending when the page closed will never arrive.
 function restoreTurns() {
-  return readSavedTurns().map((t) =>
-    t.status === "pending" ? { ...t, status: "error", error: "This message was interrupted by a page refresh. Send it again." } : t,
+  return readSavedTurns().map((turn, id) =>
+    turn.status === "pending"
+      ? { ...turn, id, status: "error", error: "This message was interrupted by a page refresh. Send it again." }
+      : { ...turn, id },
   );
 }
 
 export default function App() {
   const [view, setView] = useState(viewFromHash);
-  const [chatKey, setChatKey] = useState(0);
+  const [draft, setDraft] = useState(readSavedDraft);
   const [turns, setTurns] = useState(restoreTurns);
-  const nextTurnId = useRef(turns.reduce((max, t) => Math.max(max, t.id + 1), 0));
+  const nextTurnId = useRef(turns.length);
   const [health, setHealth] = useState(null);
   const [healthError, setHealthError] = useState(null);
 
@@ -62,6 +64,10 @@ export default function App() {
     writeSaved(TURNS_KEY, turns);
   }, [turns]);
 
+  useEffect(() => {
+    writeSaved(DRAFT_KEY, draft);
+  }, [draft]);
+
   const send = useCallback(async (message) => {
     // Turn IDs are local to this app session and also work over plain HTTP.
     const id = nextTurnId.current++;
@@ -88,8 +94,7 @@ export default function App() {
         onNavigate={go}
         onNewChat={() => {
           setTurns([]);
-          writeSaved(DRAFT_KEY, "");
-          setChatKey((k) => k + 1);
+          setDraft("");
           go("chat");
         }}
         health={health}
@@ -97,7 +102,7 @@ export default function App() {
       />
       <main className="main">
         {view === "chat" ? (
-          <ChatView key={chatKey} turns={turns} onSend={send} />
+          <ChatView turns={turns} message={draft} setMessage={setDraft} onSend={send} />
         ) : (
           <HealthView health={health} error={healthError} />
         )}

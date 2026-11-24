@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -11,6 +11,7 @@ import {
   jevOutageHealth,
   labelSwapHealth,
   lowCoverageHealth,
+  lostCardReply,
   outageHealth,
   semanticActionHealth,
 } from "./test/fixtures.js";
@@ -503,6 +504,16 @@ describe("Chat keeps its state in the tab", () => {
     expect(screen.getByText(/This demo knows about a card that has not arrived/)).toBeInTheDocument();
   });
 
+  it("counts and caps messages using the same Unicode characters as the gateway", () => {
+    renderWith(fakeGateway());
+    const composer = screen.getByLabelText("Message");
+    fireEvent.change(composer, { target: { value: "😀" } });
+    expect(screen.getByText("1 / 2000 characters")).toBeInTheDocument();
+    fireEvent.change(composer, { target: { value: "😀".repeat(2001) } });
+    expect(composer).toHaveValue("😀".repeat(2000));
+    expect(screen.getByText("2000 / 2000 characters")).toBeInTheDocument();
+  });
+
   it("explains the confidence score in the details", async () => {
     const user = renderWith(fakeGateway());
     await user.type(screen.getByLabelText("Message"), "I lost my card{Enter}");
@@ -545,7 +556,7 @@ describe("Chat keeps its state in the tab", () => {
   it("no longer shows disabled Jev and Dashboard items", async () => {
     renderWith(fakeGateway());
     expect(screen.queryByText("soon")).not.toBeInTheDocument();
-    expect(screen.getByText(/Jev picks the route for every chat message/)).toBeInTheDocument();
+    expect(screen.getByText(/Jev normally picks the route/)).toBeInTheDocument();
   });
 
   it("clears the unsent draft on New chat, also from Health", async () => {
@@ -561,10 +572,32 @@ describe("Chat keeps its state in the tab", () => {
     expect(window.sessionStorage.getItem("gateway.chat.draft")).toBeNull();
   });
 
+  it("clears the draft on New chat even when storage deletion is blocked", async () => {
+    window.sessionStorage.setItem("gateway.chat.draft", JSON.stringify("saved draft"));
+    const user = renderWith(fakeGateway());
+    vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+    await user.click(screen.getByRole("button", { name: /New chat/ }));
+    expect(screen.getByLabelText("Message")).toHaveValue("");
+    expect(JSON.parse(window.sessionStorage.getItem("gateway.chat.draft"))).toBe("");
+    await user.click(screen.getByRole("button", { name: /^Health/ }));
+    await user.click(screen.getByRole("button", { name: "Chat" }));
+    expect(screen.getByLabelText("Message")).toHaveValue("");
+  });
+
   it.each([
     ["turns", "[null]"],
     ["turns", JSON.stringify([{ id: 0, message: "hi", status: "done" }])],
     ["turns", JSON.stringify([{ message: "hi", status: "pending" }])],
+    ["turns", JSON.stringify([{
+      id: 0, message: "hi", status: "done",
+      result: { ...lostCardReply, trace: { ...lostCardReply.trace, route: {} } },
+    }])],
+    ["turns", JSON.stringify([{
+      id: 0, message: "hi", status: "done",
+      result: { ...lostCardReply, policy_facts: [{}] },
+    }])],
     ["draft", "123"],
   ])("starts empty and sends when saved %s is malformed (%s)", async (key, raw) => {
     window.sessionStorage.setItem(`gateway.chat.${key}`, raw);
