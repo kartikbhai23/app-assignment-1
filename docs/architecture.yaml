@@ -156,7 +156,7 @@ components:
       - simulated: 10 intents and 10 policy cards
       - built: One 78-label file; replies only for the 10 carded intents
       - built: Jev API key and model, operator token; real mode needs the key
-      - todo: Backend URLs
+      - built: vLLM URL and key settings, unused until the backends are wired in
       - todo: Prompt versions and rollback target; data/ splits and fresh set
 
   vllm_small:
