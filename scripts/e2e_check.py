@@ -51,6 +51,13 @@ MESSAGES = [
     ("What is the weather?", "unknown", "standard"),
 ]
 
+BACKEND_MOVEMENT_REASONS = {
+    "selected_backend_disabled",
+    "selected_backend_error",
+    "selected_backend_unavailable",
+    "semantic_last_resort",
+}
+
 METRIC_LINE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+(\S+)")
 
 
@@ -160,7 +167,7 @@ def run(base, metrics_url=None, metrics_cmd=None):
         except HTTPError as exc:
             results.check(False, f"{name}: POST /v1/chat", f"HTTP {exc.code}")
             continue
-        except (URLError, OSError) as exc:
+        except (URLError, OSError, ValueError) as exc:
             results.check(False, f"{name}: POST /v1/chat", type(exc).__name__)
             continue
         elapsed = time.time() - started
@@ -176,23 +183,26 @@ def run(base, metrics_url=None, metrics_cmd=None):
             f"{name}: reply passes the format check",
             ", ".join(trace.get("format_errors") or []),
         )
-        # trace.route is the route after any move, so compare with what Jev
-        # chose first. A different model must carry a reason in the trace.
-        first_route = trace.get("jev_choice") or trace["route"]
-        moved = trace["model"] != model_for_route.get(first_route)
-        explained = bool(trace.get("fallback_reason") or trace.get("controller_action"))
+        # The final route must match the serving model, even after a move.
         results.check(
-            not moved or explained,
-            f"{name}: model serves the first route {first_route}",
-            f"{model}, moved without a reason" if moved and not explained else model,
+            model == model_for_route.get(trace["route"]),
+            f"{name}: model serves the final route {trace['route']}",
+            model,
         )
+        first_route = trace.get("jev_choice")
+        if first_route and first_route != trace["route"]:
+            reasons = set((trace.get("fallback_reason") or "").split(", "))
+            results.check(
+                bool(reasons & BACKEND_MOVEMENT_REASONS),
+                f"{name}: movement from {first_route} has a backend fallback reason",
+            )
         results.check(
             all(fact in result["reply"] for fact in result["policy_facts"]),
             f"{name}: reply contains its policy facts",
         )
         try:
             same = get_json(base, "/v1/requests/" + result["id"]) == result
-        except (URLError, HTTPError, OSError):
+        except (URLError, HTTPError, OSError, ValueError):
             same = False
         results.check(same, f"{name}: GET /v1/requests/{{id}} returns the same reply")
         if mocked_qwen and trace.get("router") == "mock_jev":
@@ -210,10 +220,21 @@ def run(base, metrics_url=None, metrics_cmd=None):
             f"expectation {agreements}/{total}, route {route_agreements}/{total}"
         )
 
-    after = get_json(base, "/v1/health")
+    try:
+        after = get_json(base, "/v1/health")
+    except (URLError, OSError, ValueError) as exc:
+        results.check(
+            False, "gateway answers GET /v1/health at the end", type(exc).__name__
+        )
+        return results
     delivered = sum(sent.values())
     used_before, used_after = usage_by_model(before), usage_by_model(after)
-    for model, count in sorted(sent.items()):
+    for model in sorted(set(model_for_route.values())):
+        count = sent.get(model, 0)
+        if not results.check(
+            count > 0, f"coverage: {model} served at least one check message"
+        ):
+            continue
         gained = (
             used_after[model]["completed_calls"] - used_before[model]["completed_calls"]
         )
@@ -299,7 +320,7 @@ def run(base, metrics_url=None, metrics_cmd=None):
                 any(key[0] == series for key in metrics_end[1]),
                 f"Prometheus: {series} is exported",
             )
-    else:
+    elif not (metrics_url or metrics_cmd):
         results.skip("Prometheus counters", "no --metrics-url or --metrics-cmd given")
 
     if latencies:

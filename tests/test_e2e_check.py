@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from app_assignment_1.api import create_app
 from app_assignment_1.config import Settings
+from app_assignment_1.router import JevAnswer, MockJevRouter
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "e2e_check.py"
 
@@ -131,3 +132,73 @@ def test_failed_final_metrics_scrape_is_reported_not_raised(
         results = e2e.run("http://test", metrics_cmd="unused")
     assert results.failed == 1
     assert "metrics source reachable at the end" in capsys.readouterr().out
+
+
+def test_final_health_failure_preserves_the_summary(e2e, monkeypatch, tmp_path, capsys):
+    with TestClient(create_app(settings_for(tmp_path))) as client:
+        serve(e2e, monkeypatch, client)
+        get_json = e2e.get_json
+        health_reads = 0
+
+        def fail_final_health(base, path, payload=None, timeout=90):
+            nonlocal health_reads
+            if path == "/v1/health":
+                health_reads += 1
+                if health_reads == 2:
+                    raise OSError("gateway down")
+            return get_json(base, path, payload, timeout)
+
+        monkeypatch.setattr(e2e, "get_json", fail_final_health)
+        assert e2e.main(["--base-url", "http://test"]) == 1
+    out = capsys.readouterr().out
+    assert "FAIL: gateway answers GET /v1/health at the end" in out
+    assert "1 failed" in out
+
+
+def test_jev_choice_cannot_mask_a_mismatched_serving_route(
+    e2e, monkeypatch, tmp_path, capsys
+):
+    with TestClient(create_app(settings_for(tmp_path))) as client:
+        serve(e2e, monkeypatch, client)
+        get_json = e2e.get_json
+
+        def wrong_final_route(base, path, payload=None, timeout=90):
+            body = get_json(base, path, payload, timeout)
+            if path == "/v1/health":
+                body["mode"] = "real"
+            if path == "/v1/chat" or path.startswith("/v1/requests/"):
+                if body["trace"]["route"] == "standard":
+                    body["trace"]["route"] = "complex"
+            return body
+
+        monkeypatch.setattr(e2e, "get_json", wrong_final_route)
+        assert e2e.run("http://test").failed > 0
+    assert "FAIL: message 1: model serves the final route" in capsys.readouterr().out
+
+
+def test_real_run_fails_if_it_never_exercises_small(e2e, monkeypatch, tmp_path, capsys):
+    settings = settings_for(tmp_path)
+
+    class AllComplex(MockJevRouter):
+        async def route(self, message):
+            result = await super().route(message)
+            result.route = JevAnswer(
+                choice="complex",
+                confidence=1,
+                probabilities={"standard": 0, "complex": 1},
+            )
+            return result
+
+    with TestClient(create_app(settings, AllComplex(settings.intents_path))) as client:
+        serve(e2e, monkeypatch, client)
+        get_json = e2e.get_json
+
+        def as_real(base, path, payload=None, timeout=90):
+            body = get_json(base, path, payload, timeout)
+            if path == "/v1/health":
+                body["mode"] = "real"
+            return body
+
+        monkeypatch.setattr(e2e, "get_json", as_real)
+        assert e2e.run("http://test").failed == 1
+    assert "FAIL: coverage: qwen3-1.7b" in capsys.readouterr().out
