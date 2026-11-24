@@ -40,6 +40,7 @@ Smart AI Gateway (DSAN 6700 final project): a FastAPI gateway that routes bankin
 - `deploy/autostart/`: systemd units that start each instance's Compose stack at boot (`smart-gateway-cpu.service`, `smart-gateway-gpu.service`), and `gpu-preflight.sh`, which checks the private IP, the model volume and the GPU first. Install steps are in the README, Start at boot. `tests/test_autostart.py` checks the units' Compose commands.
 - `Caddyfile`: serves the React app on port 8080 and proxies `/v1`, `/docs`, `/redoc` and `/openapi.json` to the gateway. Never add `/metrics`.
 - `prometheus/prometheus.yml`: Prometheus scrape config; scrapes `gateway:8000/metrics` on the Compose network.
+- `docs/DEPLOYMENT.md`: what is running on each Jetstream2 instance now (checkout, Compose project, which env files and settings, start at boot) and a change log. No IPs or secret values. Update it with any change to an instance.
 - `docs/TEAM_PLAN.md`: who owns what. `USER_BRIEF.md`: guide for beta testers.
 - `docs/architecture.yaml`: what is built, simulated or planned in each part of the architecture, and who owns it. `docs/architecture.svg` is generated from it.
 
