@@ -2,7 +2,7 @@
 
 The probe reads Qwen3-1.7B activations and estimates whether the model's output is correct. Under the proposed label (see "Proposed decisions"), that means whether it classified the message's intent correctly, and reply quality would stay with the format checks and the judge. The probe has to beat the model's own token-probability confidence on the dev set (see "Probe gate" in `docs/TEAM_PLAN.md`). Until it does, it stays out of the live system.
 
-**Status: skeleton only.** `src/app_assignment_1/probe.py` runs end to end on mock activations. No real model has been probed, so there are no results yet. The gateway does not import this module.
+**Status: skeleton, plus a real extractor that has not been run on Qwen3-1.7B.** `src/app_assignment_1/probe.py` runs end to end on mock activations, and `src/app_assignment_1/probe_modellens.py` reads real activations with ModelLens (see below). No real model has been probed, so there are no results yet. The gateway imports neither module.
 
 ## How it fits together
 
@@ -42,9 +42,38 @@ The probe passes only if all three of these hold (`gate_passes`):
 
 The standard error is about 0.2 to 0.3 points at 4,000 runs and 0.5 at 2,000. So at the floor, the difference interval alone passes slightly too often, about 3% against 2.5%, which matches the review of #62. The full rule passes less often, because both intervals must clear zero. The worst case is token confidence ranking below chance: then only the probe-above-chance interval matters, at about 2.35%. A lopsided set like 100 and 3 passes about twice as often as it should, even under the full rule, which is why the floor exists. To rerun one row: `uv run python scripts/probe_false_pass.py --correct 20 --wrong 20 --runs 4000 --condition difference`.
 
+## Reading real activations with ModelLens
+
+[ModelLens](https://github.com/sv642-hub/DSAN-6600-ModelLens) is an interpretability toolkit from DSAN 6600 that captures a PyTorch model's layer outputs with forward hooks. `src/app_assignment_1/probe_modellens.py` uses it for the real extractor, `ModelLensExtractor`. It reads the output of one Qwen3 decoder layer (`model.layers.N`) and pools it into one vector: `last` keeps the final token, and `mean` averages over all tokens. The prompt and reply are joined with the tokenizer's chat template.
+
+ModelLens, torch and transformers are in the optional `probe` extra, pinned to one ModelLens commit. The gateway image and CI never install it. Install it on the GPU host, or any machine with enough memory for Qwen3-1.7B:
+
+```bash
+uv sync --extra dev --extra probe
+```
+
+```python
+from app_assignment_1.probe import train_probe
+from app_assignment_1.probe_modellens import ModelLensExtractor
+
+extractor = ModelLensExtractor.from_pretrained(
+    layer=14, pooling="last", revision="<pinned commit>", device="cuda"
+)
+features = [extractor.extract(e.prompt, e.reply) for e in train_examples]
+probe = train_probe(features, [e.correct for e in train_examples])
+```
+
+What was checked: the unit tests use a fake lens. By hand, on a tiny randomly initialized Qwen3 (4 layers, no download), the `last` vector matched the hidden state that transformers itself reports for that layer. It has not been run on Qwen3-1.7B, so there are no probe results.
+
+Notes:
+
+- One extractor per `ModelLens` object: attaching a layer removes the hooks attached before.
+- The proposed primary position, the last intent-label token, is not built yet. It needs the reply's token offsets.
+- Pin `revision` for a gate run and record the layer and pooling in `GateRunInfo`.
+
 ## Still to build
 
-- A real `ActivationExtractor` for Qwen3-1.7B, run offline. Torch and Transformers should go in a separate optional extra, so the gateway image stays small.
+- Run `ModelLensExtractor` on Qwen3-1.7B, offline, and pool at the last intent-label token.
 - A way to collect token confidence during the same offline pass.
 - A development split and loader. Banking77 has only train and test, so this has to be carved from its training data. The frozen evaluation set stays out of probe training and the gate, and is kept for one final report. The human grades are too few to train on, and are for checking the judge.
 - A faster trainer with regularization, such as scikit-learn, to replace `train_probe`.
