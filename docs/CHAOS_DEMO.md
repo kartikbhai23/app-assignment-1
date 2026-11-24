@@ -21,7 +21,7 @@ python3 scripts/chaos_demo.py --scenario outage
 python3 scripts/chaos_demo.py --prometheus     # also query Prometheus while each model is disabled
 ```
 
-Scenarios: `bad_format`, `outage`, `label_swap`. Each one clears every fault, lifts any disable and starts the small model's failure and semantic windows again first, so you can rerun any of them in any order and the counts in the controller's reason are that scenario's own. To start the windows again it holds and releases the small model through the operator routes, so Health shows an `operator_disabled` and an `operator_enabled` entry with reason `demo reset` before each scenario. The script exits with a non-zero status and `DEMO FAILED` if the stack does not behave as described below. It clears every fault when it ends, also after a failure or Ctrl-C, and prints a warning with the manual command if it cannot.
+Scenarios: `bad_format`, `outage`, `label_swap`. Each one clears every fault, lifts any disable and starts the small model's failure and semantic windows again first, so you can rerun any of them in any order and the counts in the controller's reason are that scenario's own. To start the windows again it holds and releases the small model through the operator routes, so Health shows an `operator_disabled` and an `operator_enabled` entry with reason `demo reset` before each scenario. The script exits with a non-zero status and `DEMO FAILED` if the stack does not behave as described below. It clears every fault when it ends, also after a failure or Ctrl-C, and reports each cleanup failure. If cleanup fails, the script exits nonzero and you can use the manual steps below.
 
 ## What to say, per scenario
 
@@ -59,7 +59,7 @@ Metrics are scraped every 15 seconds, so they trail the live screen by up to tha
 docker compose up -d --wait
 ```
 
-This returns to the normal stack without the demo override (and without its public token).
+This returns to the normal stack without the demo override (and without its public token). If you want to keep the demo stack running, use the [operator routes](../README.md#operator-routes) to clear faults and enable both models.
 
 ## If something goes wrong
 

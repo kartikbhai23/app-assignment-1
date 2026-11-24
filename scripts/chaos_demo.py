@@ -74,6 +74,8 @@ class Api:
             raise DemoError(f"{path} answered {error.code}") from None
         except (URLError, TimeoutError, ConnectionError) as error:
             raise DemoError(f"cannot reach {self.base}{path}: {error}") from None
+        except ValueError:
+            raise DemoError(f"{path} did not return valid JSON") from None
 
 
 def monitor(api: Any, name: str) -> dict[str, Any]:
@@ -116,19 +118,25 @@ def reset(api: Any) -> None:
     api.call(f"/v1/operator/models/{SMALL}/enable", {"reason": "demo reset"})
 
 
-def clear_faults(api: Any) -> None:
-    """Best effort: clear every fault and hold, and say so if that fails."""
-    try:
-        reset(api)
-    except (DemoError, KeyError):
+def clear_faults(api: Any) -> bool:
+    """Try every cleanup action even if an earlier call fails."""
+    clean = True
+    for model in (SMALL, LARGE):
+        for path, payload in (
+            ("/v1/faults", {"model": model, "fault": "none"}),
+            (f"/v1/operator/models/{model}/enable", {"reason": "demo cleanup"}),
+        ):
+            try:
+                api.call(path, payload)
+            except DemoError as error:
+                clean = False
+                print(f"WARNING: cleanup failed for {model}: {error}", file=sys.stderr)
+    if not clean:
         print(
-            "WARNING: could not clear the faults. Run: curl -X POST -H "
-            "'Authorization: Bearer $APP_OPERATOR_TOKEN' "
-            "-H 'Content-Type: application/json' "
-            '-d \'{"model":"qwen3-1.7b","fault":"none"}\' '
-            "URL/v1/faults",
+            "DEMO FAILED: cleanup incomplete. See docs/CHAOS_DEMO.md.",
             file=sys.stderr,
         )
+    return clean
 
 
 def run_scenario(
@@ -271,19 +279,22 @@ def main(argv: list[str]) -> int:
     api = Api(args.url, os.environ.get("APP_OPERATOR_TOKEN", DEMO_TOKEN))
     names = list(SCENARIOS) if args.scenario == "all" else [args.scenario]
     results = []
-    failed = False
+    exit_code = 0
     try:
         for name in names:
             hook = prometheus if args.prometheus else None
             results.append(run_scenario(api, name, while_disabled=hook))
     except DemoError as error:
         print("DEMO FAILED: " + str(error), file=sys.stderr)
-        failed = True
+        exit_code = 1
+    except KeyboardInterrupt:
+        print("DEMO FAILED: interrupted", file=sys.stderr)
+        exit_code = 130
     finally:
-        # Also after an error or Ctrl-C: never leave a fault set on the stack.
-        clear_faults(api)
-    if failed:
-        return 1
+        if not clear_faults(api):
+            exit_code = exit_code or 1
+    if exit_code:
+        return exit_code
     summary(results)
     return 0
 

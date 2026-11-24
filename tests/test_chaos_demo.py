@@ -199,3 +199,24 @@ def test_unreachable_gateway_says_demo_failed(
     err = capsys.readouterr().err
     assert "DEMO FAILED: cannot reach" in err
     assert "Traceback" not in err
+
+
+def test_cleanup_tries_both_models_and_fails_the_run(monkeypatch, capsys) -> None:
+    calls = []
+
+    class FailingCleanupApi:
+        def call(self, path, payload):
+            calls.append((path, payload.get("model")))
+            if len(calls) == 1:
+                raise demo.DemoError("first cleanup request failed")
+
+    monkeypatch.setattr(demo, "Api", lambda *_: FailingCleanupApi())
+    monkeypatch.setattr(demo, "run_scenario", lambda *_, **__: {})
+    assert demo.main(["--scenario", "outage"]) == 1
+    assert calls == [
+        ("/v1/faults", demo.SMALL),
+        (f"/v1/operator/models/{demo.SMALL}/enable", None),
+        ("/v1/faults", demo.LARGE),
+        (f"/v1/operator/models/{demo.LARGE}/enable", None),
+    ]
+    assert "cleanup failed" in capsys.readouterr().err
