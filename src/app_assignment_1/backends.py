@@ -28,12 +28,17 @@ class Backend(Protocol):
     """
 
     config: BackendConfig
+    # True for a simulated model. The semantic monitor only compares a mock
+    # with mock Jev, or a real model with real Jev (see semantic.py).
+    mocked: bool
 
     async def generate(self, message: str) -> BackendReply: ...
 
 
 class MockBackend:
     """Both mock models share one keyword classifier; only the delay differs."""
+
+    mocked = True
 
     def __init__(
         self,

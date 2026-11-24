@@ -40,7 +40,8 @@ class BackendReply(StrictModel):
 
 
 class Trace(StrictModel):
-    router: Literal["mock_jev", "rule_router"]
+    # jev: the real TypeSafe Jev answered the route question.
+    router: Literal["mock_jev", "jev", "rule_router"]
     jev_choice: Route | None
     route: Route
     model: BackendName
@@ -54,6 +55,7 @@ class Trace(StrictModel):
     format_errors: list[str] = Field(default_factory=list)
     fallback_reason: str | None = None
     controller_action: str | None = None
+    # The reply came from a mock Qwen backend; router says whether Jev was real.
     mocked: Literal[True] = True
 
 
@@ -118,6 +120,23 @@ class BackendConfig(StrictModel):
     label_swap_rate: float = Field(default=0, ge=0, le=1)
 
 
+FaultKind = Literal["none", "outage", "bad_format", "label_swap"]
+
+
+class FaultRequest(StrictModel):
+    """Set one simulated fault on one mock model. `none` clears all three."""
+
+    model: BackendName
+    fault: FaultKind
+    # Share of calls the fault hits; ignored for `none`.
+    rate: float = Field(default=1, ge=0, le=1)
+
+
+class OperatorRequest(StrictModel):
+    # Saved in the intervention log; never put customer data here.
+    reason: str = Field(default="operator request", min_length=1, max_length=200)
+
+
 class BackendMonitor(StrictModel):
     name: BackendName
     samples: int = Field(ge=0)
@@ -125,13 +144,30 @@ class BackendMonitor(StrictModel):
     call_errors: int = Field(ge=0)
     failure_rate: float | None = Field(ge=0, le=1)
     disabled_by_controller: bool
+    # Why the controller disabled it: format failures and call errors, or
+    # intents that differ from Jev's (a last resort when no other model answers).
+    disabled_for: Literal["failure", "semantic"] | None = None
+    # Held by POST /v1/operator/models/{name}/disable until an operator enables it.
+    disabled_by_operator: bool = False
     disabled_for_seconds: float | None = Field(default=None, ge=0)
+    # Has calls in its failure window, at a rate below the threshold. A
+    # semantic disable of the other model needs this.
+    answering: bool = False
+
+
+InterventionAction = Literal[
+    "disabled",
+    "re-enabled",
+    "kept_last_backend",
+    "operator_disabled",
+    "operator_enabled",
+]
 
 
 class Intervention(StrictModel):
     at: datetime
     backend: BackendName
-    action: Literal["disabled", "re-enabled", "kept_last_backend"]
+    action: InterventionAction
     reason: str
 
 
@@ -157,9 +193,23 @@ class ModelUsage(StrictModel):
     attempted_calls: int = Field(ge=0)
     completed_calls: int = Field(ge=0)
     failed_calls: int = Field(ge=0)
+    deadline_exceeded_calls: int = Field(default=0, ge=0)
     input_tokens: int | None = None
     output_tokens: int | None = None
     estimated_cost_usd: float | None = None
+
+
+class JevUsage(StrictModel):
+    """Jev calls that returned an answer since the gateway started, and their
+    tokens. Each call counts once, not once per question."""
+
+    mocked: bool
+    answered_calls: int = Field(ge=0)
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    # Input tokens times APP_JEV_INPUT_PRICE_PER_MILLION_USD; Jev does not
+    # charge for output tokens. None while the price is unset.
+    estimated_cost_usd: float | None = Field(default=None, ge=0)
 
 
 class JevBreakerStatus(StrictModel):
@@ -191,6 +241,9 @@ class SemanticStatus(StrictModel):
     rerouted_agreements: int = Field(ge=0)
     rerouted_disagreements: int = Field(ge=0)
     rerouted_no_signal: int = Field(ge=0)
+    # Replies since the gateway started that were not scored, because one of
+    # Jev and the model is a mock and the other is real.
+    not_compared: int = Field(default=0, ge=0)
 
 
 class SemanticRules(StrictModel):
@@ -199,18 +252,23 @@ class SemanticRules(StrictModel):
     min_coverage: float = Field(ge=0, le=1)
     baseline_disagreement_rate: float | None = Field(ge=0, le=1)
     alert_margin: float = Field(ge=0, le=1)
+    # Whether the controller disables a model that is above the baseline.
+    actions_enabled: bool
 
 
 class HealthResponse(StrictModel):
     recent_requests: list[RecentRequest] = Field(default_factory=list)
     usage: list[ModelUsage] = Field(default_factory=list)
     status: Literal["ok", "degraded"]
+    # mode is the Qwen backends; jev_mode and router are Jev.
     mode: Literal["mock"] = "mock"
-    router: Literal["mock_jev"] = "mock_jev"
+    jev_mode: Literal["mock", "real"] = "mock"
+    router: Literal["mock_jev", "jev"] = "mock_jev"
     backends: list[BackendConfig]
     monitor: list[BackendMonitor]
     interventions: list[Intervention]
     controller: ControllerRules
     jev_breaker: JevBreakerStatus
+    jev_usage: JevUsage
     semantic: list[SemanticStatus]
     semantic_rules: SemanticRules

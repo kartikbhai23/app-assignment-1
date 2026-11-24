@@ -44,6 +44,8 @@ def build_system_prompt(labels: LabelSet, cards: dict[str, PolicyCard]) -> str:
 
 
 class VLLMBackend:
+    mocked = False
+
     def __init__(
         self,
         config: BackendConfig,

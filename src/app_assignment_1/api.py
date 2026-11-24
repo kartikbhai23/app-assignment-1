@@ -1,22 +1,36 @@
 """Smart AI Gateway mocked midpoint API."""
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST
 
+from app_assignment_1.auth import require_operator
 from app_assignment_1.config import Settings, get_settings
+from app_assignment_1.jev import TypeSafeJevRouter, create_jev_http_client
+from app_assignment_1.labels import load_labels
 from app_assignment_1.router import MockJevRouter, Router
 from app_assignment_1.schemas import (
+    BackendConfig,
+    BackendMonitor,
+    BackendName,
     ChatRequest,
     ChatResponse,
+    FaultRequest,
     HealthResponse,
     JevBreakerStatus,
+    OperatorRequest,
     RecentRequest,
 )
-from app_assignment_1.service import BackendUnavailable, Gateway
+from app_assignment_1.service import (
+    BackendUnavailable,
+    DeadlineExceeded,
+    Gateway,
+    LastUsableBackend,
+    NotAMock,
+)
 from app_assignment_1.store import Store, create_store
 
 
@@ -29,25 +43,36 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         configured = settings or get_settings()
         opened = store or create_store(configured)
-        gateway = Gateway(
-            configured,
-            router or MockJevRouter(configured.intents_path),
-            store=opened,
-        )
-        await opened.open()
-        app.state.gateway = gateway
-        try:
-            yield
-        finally:
-            # Save anything noticed since the last request, such as a re-enable
-            # seen by a /metrics scrape.
-            await gateway.save_interventions()
-            await opened.close()
+        async with AsyncExitStack() as stack:
+            if router is not None:
+                chosen: Router = router
+            elif configured.jev_mode == "real":
+                # One shared client for the app's lifetime, closed on exit.
+                client = await stack.enter_async_context(
+                    create_jev_http_client(configured)
+                )
+                chosen = TypeSafeJevRouter(
+                    client, configured.jev_model, load_labels(configured.labels_path)
+                )
+            else:
+                chosen = MockJevRouter(configured.intents_path)
+            gateway = Gateway(configured, chosen, store=opened)
+            await opened.open()
+            app.state.gateway = gateway
+            app.state.operator_token = configured.operator_token
+            try:
+                yield
+            finally:
+                await gateway.finish_saves()
+                await opened.close()
 
     app = FastAPI(
         title="Smart AI Gateway (mock prototype)",
         version="0.2.0",
-        description="Fictional policy replies. No Jev, Qwen or GPU calls.",
+        description=(
+            "Fictional policy replies from mock Qwen backends. Jev is a local "
+            "mock unless APP_JEV_MODE=real, which sends each message to TypeSafe."
+        ),
         lifespan=lifespan,
     )
 
@@ -61,7 +86,12 @@ def create_app(
         try:
             return await gateway.chat(payload.message)
         except BackendUnavailable as exc:
-            raise HTTPException(503, "No mock backend is available") from exc
+            detail = (
+                "deadline_exceeded"
+                if isinstance(exc, DeadlineExceeded)
+                else "No mock backend is available"
+            )
+            raise HTTPException(503, detail) from exc
 
     @app.get("/v1/requests/{request_id}", response_model=ChatResponse)
     async def get_request(request_id: UUID, request: Request) -> ChatResponse:
@@ -84,6 +114,8 @@ def create_app(
         await gateway.save_interventions()
         return HealthResponse(
             status="ok" if healthy else "degraded",
+            jev_mode="mock" if gateway.jev_mocked else "real",
+            router="mock_jev" if gateway.jev_mocked else "jev",
             recent_requests=[
                 RecentRequest(
                     completed_at=r.completed_at,
@@ -107,7 +139,56 @@ def create_app(
             ),
             semantic=gateway.semantic.stats(),
             semantic_rules=gateway.semantic.rules,
+            jev_usage=gateway.jev_usage(),
         )
+
+    # Operator routes. Caddy proxies /v1, so the token is what guards them.
+    @app.post(
+        "/v1/operator/models/{name}/disable",
+        response_model=list[BackendMonitor],
+        dependencies=[Depends(require_operator)],
+        responses={409: {"description": "It is the last usable model"}},
+    )
+    async def operator_disable(
+        name: BackendName, request: Request, payload: OperatorRequest | None = None
+    ) -> list[BackendMonitor]:
+        """Hold a model disabled until an operator enables it. No cooldown."""
+        gateway: Gateway = request.app.state.gateway
+        try:
+            gateway.operator_disable(name, (payload or OperatorRequest()).reason)
+        except LastUsableBackend:
+            raise HTTPException(409, f"{name} is the last usable model") from None
+        await gateway.save_interventions()
+        return gateway.controller.stats()
+
+    @app.post(
+        "/v1/operator/models/{name}/enable",
+        response_model=list[BackendMonitor],
+        dependencies=[Depends(require_operator)],
+    )
+    async def operator_enable(
+        name: BackendName, request: Request, payload: OperatorRequest | None = None
+    ) -> list[BackendMonitor]:
+        """Lift an operator hold or a controller cooldown, with a fresh window."""
+        gateway: Gateway = request.app.state.gateway
+        gateway.operator_enable(name, (payload or OperatorRequest()).reason)
+        await gateway.save_interventions()
+        return gateway.controller.stats()
+
+    @app.post(
+        "/v1/faults",
+        response_model=BackendConfig,
+        dependencies=[Depends(require_operator)],
+        responses={409: {"description": "The model is not a mock"}},
+    )
+    async def set_fault(payload: FaultRequest, request: Request) -> BackendConfig:
+        """Set a simulated fault on a mock model while it runs. Lost on restart;
+        the Compose overrides set faults at startup."""
+        gateway: Gateway = request.app.state.gateway
+        try:
+            return gateway.set_fault(payload)
+        except NotAMock:
+            raise HTTPException(409, f"{payload.model} is not a mock model") from None
 
     # Internal only: Caddy does not proxy /metrics, and it stays out of /v1 and
     # the OpenAPI docs. Prometheus scrapes it on the Compose network.
