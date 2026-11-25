@@ -29,7 +29,7 @@ Confidence is a keyword heuristic, not a calibrated probability. Measured latenc
 
 ## Monitor and controller
 
-The gateway runs a small in-memory self-healing loop, the first piece of the planned monitor:
+The gateway runs a small in-memory self-healing loop, the first piece of the planned monitor. [docs/MONITORING.md](docs/MONITORING.md) is the runbook: how the pieces below recover together, where to look, and what to do for each alert.
 
 - **Monitor:** for each backend, the gateway records whether each reply passed the format check and whether each call raised an error, over the last `APP_MONITOR_WINDOW` calls (default 20).
 - **Controller:** once a backend has at least `APP_MONITOR_MIN_SAMPLES` calls (default 5) and its failure rate (failed format checks plus failed calls) reaches `APP_MONITOR_FAILURE_THRESHOLD` (default 0.5), the controller disables it for `APP_CONTROLLER_COOLDOWN_SECONDS` (default 60). Traffic for that route moves to the other backend with `fallback_reason: "selected_backend_disabled"`. After the cooldown, the backend is re-enabled with an empty window.
@@ -193,7 +193,7 @@ Labels only take values from fixed lists. Message text, replies and request IDs 
 
 ### Alerts
 
-[`prometheus/alerts.yml`](prometheus/alerts.yml) has 8 alert rules, which Prometheus evaluates every 15 seconds. There is no Alertmanager yet, so nothing is sent anywhere: firing alerts show in Prometheus's `/alerts` page and `/api/v1/alerts`. The thresholds are starting points for the mock prototype, not measured values.
+[`prometheus/alerts.yml`](prometheus/alerts.yml) has 8 alert rules, and [docs/MONITORING.md](docs/MONITORING.md) says what to do for each one. Prometheus evaluates the rules every 15 seconds. There is no Alertmanager yet, so nothing is sent anywhere: firing alerts show in Prometheus's `/alerts` page and `/api/v1/alerts`. The thresholds are starting points for the mock prototype, not measured values.
 
 | Alert | Severity | Fires when |
 | --- | --- | --- |

@@ -2,6 +2,7 @@
 # firing alerts at /alerts and /api/v1/alerts. There is no Alertmanager yet, so
 # nothing is sent anywhere. Tests: prometheus/alerts_test.yml (promtool) and
 # tests/test_alert_rules.py (every metric used here is one the gateway serves).
+# Each alert's runbook_url points to its section in docs/MONITORING.md.
 #
 # Thresholds are starting points for the mock prototype, not measured values.
 # Revisit them once the real models run.
@@ -15,6 +16,7 @@ groups:
         labels:
           severity: critical
         annotations:
+          runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#gatewaydown
           summary: Prometheus cannot scrape the gateway
           description: The gateway's /metrics has not answered for 1 minute.
 
@@ -23,6 +25,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#modeldisabledbycontroller
           summary: "The controller disabled {{ $labels.model }}"
           description: >-
             Its route's traffic goes to the other model until the cooldown ends.
@@ -34,6 +37,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#modelfailureraterising
           summary: "{{ $labels.model }} fails {{ $value | humanizePercentage }} of recent calls"
           description: >-
             Format failures plus failed calls in the monitor window. The
@@ -45,6 +49,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#possiblewrongintents
           summary: "{{ $labels.model }} disagrees with Jev above the baseline"
           description: >-
             Its replies pass the format check but often name a different intent
@@ -55,6 +60,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#chatrequestsfailing
           summary: Chat requests got a 503 in the last 5 minutes
           description: No model could answer them, or the request deadline ran out.
 
@@ -70,6 +76,7 @@ groups:
         labels:
           severity: critical
         annotations:
+          runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#chatmostlyfailing
           summary: "{{ $value | humanizePercentage }} of chat requests get a 503"
           description: More than 1 in 5 requests fail for 5 minutes.
 
@@ -82,6 +89,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#jevmostlyskipped
           summary: "Keyword rules route {{ $value | humanizePercentage }} of messages"
           description: >-
             Jev times out, errors, gives an invalid route, or its circuit
@@ -95,5 +103,6 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#chatlatencyhigh
           summary: p95 chat latency is above 10 s
           description: The request deadline is 45 s by default.

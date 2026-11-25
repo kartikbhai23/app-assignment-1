@@ -16,6 +16,10 @@ from app_assignment_1.config import Settings
 from app_assignment_1.router import MockJevRouter
 
 RULES = Path("prometheus/alerts.yml")
+RUNBOOK = Path("docs/MONITORING.md")
+RUNBOOK_URL = (
+    "https://github.com/sv642-hub/app-assignment-1/blob/main/docs/MONITORING.md#"
+)
 SERIES = re.compile(r"\b(gateway_[a-z_]+)\b(?:\{([^}]*)\})?")
 MATCHER = re.compile(r"(\w+)\s*(?:=~|!~|!=|=)")
 GROUPING = re.compile(r"\b(?:by|without)\s*\(([^)]*)\)")
@@ -118,3 +122,13 @@ def test_prometheus_loads_the_rules_file():
     assert config["rule_files"] == ["alerts.yml"]
     compose = Path("compose.yml").read_text()
     assert "./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro" in compose
+
+
+def test_every_alert_links_to_its_runbook_section():
+    # GitHub turns the heading "### GatewayDown" into the anchor #gatewaydown.
+    text = RUNBOOK.read_text()
+    alerts_part = text.split("\n## Alerts\n", 1)[1].split("\n## ", 1)[0]
+    headings = re.findall(r"^### (\S+)$", alerts_part, re.M)
+    assert headings == [rule["alert"] for rule in rules()]
+    for rule in rules():
+        assert rule["annotations"]["runbook_url"] == RUNBOOK_URL + rule["alert"].lower()
