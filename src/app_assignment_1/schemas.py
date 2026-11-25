@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Route = Literal["standard", "complex"]
 BackendName = Literal["qwen3-1.7b", "qwen3-4b"]
@@ -141,6 +141,36 @@ class FaultRequest(StrictModel):
     fault: FaultKind
     # Share of calls the fault hits; ignored for `none`.
     rate: float = Field(default=1, ge=0, le=1)
+
+
+JevFaultKind = Literal["none", "outage", "slow"]
+
+
+class JevFaultConfig(StrictModel):
+    """Simulated faults on the mock Jev router, set through /v1/faults/jev."""
+
+    # Share of calls that raise, as a TypeSafe outage would.
+    error_rate: float = Field(default=0, ge=0, le=1)
+    # Share of calls held for slow_seconds more before answering. Past
+    # APP_JEV_TIMEOUT_SECONDS the gateway uses the rule router.
+    slow_rate: float = Field(default=0, ge=0, le=1)
+    slow_seconds: float = Field(default=0, ge=0, le=120)
+
+
+class JevFaultRequest(StrictModel):
+    """Set one simulated fault on the mock Jev router. `none` clears both."""
+
+    fault: JevFaultKind
+    # Share of calls the fault hits; ignored for `none`.
+    rate: float = Field(default=1, ge=0, le=1, allow_inf_nan=False)
+    # Extra seconds a `slow` call is held; required for `slow` only.
+    seconds: float | None = Field(default=None, gt=0, le=120, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def seconds_only_for_slow(self) -> "JevFaultRequest":
+        if (self.fault == "slow") != (self.seconds is not None):
+            raise ValueError("seconds is required for slow and only allowed for slow")
+        return self
 
 
 class OperatorRequest(StrictModel):

@@ -98,7 +98,7 @@ components:
     items:
       - built: Outage, bad format and label swap, by Compose override
       - todo: Bad prompt
-      - built: POST /v1/faults with operator token
+      - built: "POST /v1/faults, and /faults/jev for mock Jev"
 
   jev_intent:
     title: Jev intent question

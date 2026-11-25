@@ -20,7 +20,13 @@ from app_assignment_1.labels import UNKNOWN, load_labels
 from app_assignment_1.metrics import GatewayMetrics
 from app_assignment_1.monitor import Controller
 from app_assignment_1.records import JevAssessment, check_call
-from app_assignment_1.router import JevAnswer, JevResult, Router, RuleRouter
+from app_assignment_1.router import (
+    JevAnswer,
+    JevResult,
+    MockJevRouter,
+    Router,
+    RuleRouter,
+)
 from app_assignment_1.schemas import (
     BackendConfig,
     BackendErrorCode,
@@ -28,6 +34,8 @@ from app_assignment_1.schemas import (
     BackendReply,
     ChatResponse,
     FaultRequest,
+    JevFaultConfig,
+    JevFaultRequest,
     JevUsage,
     ModelUsage,
     PolicyCard,
@@ -300,6 +308,24 @@ class Gateway:
             "Operator set fault %s=%s on %s", request.fault, request.rate, request.model
         )
         return config
+
+    def set_jev_fault(self, request: JevFaultRequest) -> JevFaultConfig:
+        """Change the mock Jev router's simulated faults while it runs."""
+        router = self.router
+        if not isinstance(router, MockJevRouter):
+            raise NotAMock("jev")
+        if request.fault == "none":
+            faults = JevFaultConfig()
+        elif request.fault == "outage":
+            faults = router.faults.model_copy(update={"error_rate": request.rate})
+        else:
+            faults = router.faults.model_copy(
+                update={"slow_rate": request.rate, "slow_seconds": request.seconds}
+            )
+        # Replaced, not changed in place, so a call in flight keeps its faults.
+        router.faults = faults
+        logger.info("Operator set Jev fault %s=%s", request.fault, request.rate)
+        return faults
 
     async def save_interventions(self) -> None:
         """Move the controller's new interventions to the store, in order."""

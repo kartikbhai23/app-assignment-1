@@ -1,10 +1,15 @@
 """Smart AI Gateway mocked midpoint API."""
 
+import math
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
+from typing import Any
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST
 
 from app_assignment_1.auth import require_operator
@@ -22,6 +27,8 @@ from app_assignment_1.schemas import (
     FaultRequest,
     HealthResponse,
     JevBreakerStatus,
+    JevFaultConfig,
+    JevFaultRequest,
     OperatorRequest,
     RecentRequest,
 )
@@ -81,6 +88,17 @@ def create_app(
         ),
         lifespan=lifespan,
     )
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        """The default 422, except that a NaN or Infinity the client sent is
+        echoed as text: JSON can't hold it, and writing it gave a 500."""
+        return JSONResponse(
+            status_code=422,
+            content={"detail": _finite(jsonable_encoder(exc.errors()))},
+        )
 
     @app.post(
         "/v1/chat",
@@ -200,6 +218,23 @@ def create_app(
         except NotAMock:
             raise HTTPException(409, f"{payload.model} is not a mock model") from None
 
+    @app.post(
+        "/v1/faults/jev",
+        response_model=JevFaultConfig,
+        dependencies=[Depends(require_operator)],
+        responses={409: {"description": "Jev is real, not the mock"}},
+    )
+    async def set_jev_fault(
+        payload: JevFaultRequest, request: Request
+    ) -> JevFaultConfig:
+        """Set a simulated fault on the mock Jev router while it runs: `outage`
+        makes calls fail, `slow` holds them for `seconds` more. Lost on restart."""
+        gateway: Gateway = request.app.state.gateway
+        try:
+            return gateway.set_jev_fault(payload)
+        except NotAMock:
+            raise HTTPException(409, "Jev is real, not the mock") from None
+
     # Internal only: Caddy does not proxy /metrics, and it stays out of /v1 and
     # the OpenAPI docs. Prometheus scrapes it on the Compose network.
     @app.get("/metrics", include_in_schema=False)
@@ -208,6 +243,17 @@ def create_app(
         return Response(gateway.metrics.render(), media_type=CONTENT_TYPE_LATEST)
 
     return app
+
+
+def _finite(value: Any) -> Any:
+    """Copy `value` with each non-finite float replaced by its text."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _finite(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_finite(item) for item in value]
+    return value
 
 
 app = create_app()

@@ -3,8 +3,10 @@
 The rule router is the fallback and chooses a route only.
 """
 
+import asyncio
 import hashlib
 import json
+import random
 from pathlib import Path
 from typing import Protocol
 
@@ -18,7 +20,7 @@ from app_assignment_1.records import (
     check_probabilities,
     check_route_order,
 )
-from app_assignment_1.schemas import RoutingDecision, StrictModel
+from app_assignment_1.schemas import JevFaultConfig, RoutingDecision, StrictModel
 
 
 class JevAnswer(StrictModel):
@@ -108,8 +110,19 @@ class MockJevRouter:
         # The mock chooses from its own intents, not the 78 labels.
         digest = hashlib.sha256(json.dumps(self.intent_options).encode()).hexdigest()
         self.option_set_version = f"mock-intents-{digest[:12]}"
+        # Simulated faults, set through /v1/faults/jev; none by default.
+        self.faults = JevFaultConfig()
+        self.rng = random.Random()
 
     async def route(self, message: str) -> JevResult:
+        # Draw only for a fault that is set, so runs without Jev faults keep
+        # the same random sequence.
+        faults = self.faults
+        if faults.slow_rate and self.rng.random() < faults.slow_rate:
+            # The gateway's Jev timeout cancels this wait.
+            await asyncio.sleep(faults.slow_seconds)
+        if faults.error_rate and self.rng.random() < faults.error_rate:
+            raise ConnectionError("Simulated Jev outage")
         score, match = match_intent(self.intents, message)
         if match is None:
             route, intent, confidence = "standard", UNKNOWN, 0.5
