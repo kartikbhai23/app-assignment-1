@@ -65,6 +65,9 @@ class Trace(StrictModel):
     # Whether the reply came from a mock Qwen backend; router says whether Jev
     # was real.
     mocked: bool = True
+    # Groups requests by the settings and config files that answered them.
+    # None on requests saved before it existed.
+    settings_version: str | None = None
 
 
 class ChatResponse(StrictModel):
@@ -285,5 +288,7 @@ class HealthResponse(StrictModel):
     controller: ControllerRules
     jev_breaker: JevBreakerStatus
     jev_usage: JevUsage
+    # The same ID as on each reply's trace, for the settings now in use.
+    settings_version: str | None = None
     semantic: list[SemanticStatus]
     semantic_rules: SemanticRules

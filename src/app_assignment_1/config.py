@@ -1,11 +1,15 @@
 """Cached Pydantic Settings. Environment variables override optional env files."""
 
+import hashlib
+import json
+from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, get_args
+from urllib.parse import urlsplit
 
 from psycopg.conninfo import conninfo_to_dict
-from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # The throwaway password in env/compose.defaults.env. It is public, so a
@@ -30,6 +34,16 @@ class Settings(BaseSettings):
     policy_cards_path: Path = Path("config/policy_cards.json")
     backends_path: Path = Path("config/backends.json")
     request_store_limit: int = Field(default=1000, ge=1, le=100000)
+    # Postgres keeps every request by default, for analysis. Set a number to
+    # keep only the newest ones. The memory store uses request_store_limit.
+    postgres_request_limit: int | None = Field(default=None, ge=1)
+
+    @field_validator("postgres_request_limit", mode="before")
+    @classmethod
+    def blank_limit_keeps_everything(cls, value: object) -> object:
+        # Uncommenting the template line and leaving it blank means "no limit".
+        return None if isinstance(value, str) and not value.strip() else value
+
     jev_timeout_seconds: float = Field(default=2, gt=0, le=30)
     rule_router_complex_min_words: int = Field(default=20, ge=1, le=2000)
     monitor_window: int = Field(default=20, ge=1, le=1000)
@@ -174,6 +188,52 @@ class Settings(BaseSettings):
         if self.vllm_api_key is None or not self.vllm_api_key.get_secret_value():
             raise ValueError("provider_mode 'real' needs APP_VLLM_API_KEY")
         return self
+
+
+def settings_version(
+    settings: "Settings",
+    files: Iterable[Path],
+    backends: Iterable[dict[str, Any]] | None = None,
+) -> str:
+    """A short ID for the settings and config that answer requests.
+
+    Two requests with the same ID ran under the same thresholds, switches and
+    config, so statistics can be grouped by it. What goes in:
+    - the settings, except SecretStr fields (left out, not hashed) and the
+      config file paths (their contents count, not how a path is spelled);
+      a URL's user and password are dropped;
+    - each file's name and contents;
+    - `backends`, the models' live config, when given. The gateway passes it
+      in place of backends.json, so a fault set at runtime changes the ID.
+    """
+    fields = type(settings).model_fields
+    left_out = {
+        name
+        for name, field in fields.items()
+        if field.annotation is Path
+        or field.annotation is SecretStr
+        or SecretStr in get_args(field.annotation)
+    }
+    values = {
+        name: _without_userinfo(value) if isinstance(value, str) else value
+        for name, value in settings.model_dump(mode="json").items()
+        if name not in left_out
+    }
+    digest = hashlib.sha256(json.dumps(values, sort_keys=True).encode())
+    for path in files:
+        digest.update(path.name.encode())
+        digest.update(path.read_bytes())
+    if backends is not None:
+        digest.update(json.dumps(list(backends), sort_keys=True).encode())
+    return f"settings-{digest.hexdigest()[:12]}"
+
+
+def _without_userinfo(value: str) -> str:
+    """Drop a user and password from a URL, so they can't change the public ID."""
+    parts = urlsplit(value)
+    if not parts.scheme or "@" not in parts.netloc:
+        return value
+    return parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]).geturl()
 
 
 @lru_cache
