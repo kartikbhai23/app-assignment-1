@@ -191,6 +191,37 @@ The `prometheus` service (Prometheus 3.15.1, config in [`prometheus/prometheus.y
 
 Labels only take values from fixed lists. Message text, replies and request IDs are never labels; a test checks this. All values are in memory and reset when the gateway restarts. A re-enable is counted when the gateway next checks the model (a request, `/v1/health` or a scrape), not at the exact end of the cooldown. With the mock backends, latency includes the simulated delay and says nothing about real model speed. Jev tokens and estimated cost are counted since the gateway started; mock Jev reports 0 tokens. `/v1/health` has the same totals in `jev_usage`, and the Health screen shows them on the Jev card. There are no Qwen token or cost metrics yet, and Prometheus does not scrape vLLM or a separate monitor because neither runs with the gateway yet.
 
+### Alerts
+
+[`prometheus/alerts.yml`](prometheus/alerts.yml) has 8 alert rules, which Prometheus evaluates every 15 seconds. There is no Alertmanager yet, so nothing is sent anywhere: firing alerts show in Prometheus's `/alerts` page and `/api/v1/alerts`. The thresholds are starting points for the mock prototype, not measured values.
+
+| Alert | Severity | Fires when |
+| --- | --- | --- |
+| `GatewayDown` | critical | Prometheus can't scrape the gateway for 1 minute |
+| `ModelDisabledByController` | warning | The controller has a model disabled |
+| `ModelFailureRateRising` | warning | A model fails 25% or more of the calls in its window, with at least 5 calls, for 2 minutes. The controller acts at 50% by default |
+| `PossibleWrongIntents` | warning | A model is above the semantic baseline for 5 minutes |
+| `ChatRequestsFailing` | warning | Any chat request got a 503 in the last 5 minutes |
+| `ChatMostlyFailing` | critical | More than 20% of chat requests get a 503 for 5 minutes |
+| `JevMostlySkipped` | warning | The rule router routes more than half of messages for 5 minutes, because Jev fails or its breaker is open |
+| `ChatLatencyHigh` | warning | p95 chat latency is above 10 s for 10 minutes |
+
+**Hard failures and slow drift.** `ModelFailureRateRising` and `PossibleWrongIntents` are for problems the controller does not act on: a model failing some calls but below the 50% threshold, or wrong intents while semantic actions are off or the other model can't take over. For a hard failure, the controller disables the model within a few requests, and `ModelDisabledByController` fires. The re-enable then clears the window, which restarts the `for:` timer of the two slower alerts, so they may never fire during a hard failure. `PossibleWrongIntents` also needs `APP_SEMANTIC_BASELINE_DISAGREEMENT_RATE`: without a baseline, its gauge stays 0 at any disagreement rate.
+
+`ChatMostlyFailing` and `JevMostlySkipped` divide by the number of replies, and `gateway_chat_requests_total` has no series until the first reply. Each rule adds `or vector(0)` to that term, so a full outage right after a restart still fires.
+
+`prometheus/alerts_test.yml` tests each alert with promtool, including cases that must not fire. CI runs it, and checks that Compose's Prometheus loaded the rules. `tests/test_alert_rules.py` checks that every metric the rules use is one the gateway serves. To run the promtool tests locally:
+
+```bash
+docker run --rm -v "$PWD/prometheus:/etc/prometheus:ro" -w /etc/prometheus --entrypoint promtool prom/prometheus:v3.15.1 test rules alerts_test.yml
+```
+
+To see firing alerts in the running stack:
+
+```bash
+docker compose exec prometheus wget -qO- http://127.0.0.1:9090/api/v1/alerts
+```
+
 To look at metrics without publishing a port:
 
 ```bash

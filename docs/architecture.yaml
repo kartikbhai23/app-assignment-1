@@ -136,6 +136,7 @@ components:
       - built: Requests, latency, errors, Jev fallbacks, controller
       - built: Semantic disagreement and coverage
       - built: Jev tokens and estimated cost
+      - built: Alert rules, tested with promtool
       - todo: vLLM targets; Qwen cost
 
   postgres:
@@ -263,8 +264,8 @@ layout:
     jev_intent: [620, 850, 225, 205]
     semantic_monitor: [855, 850, 225, 205]
     controller: [1090, 850, 225, 205]
-    prometheus: [300, 690, 270, 225]
-    postgres: [300, 930, 270, 320]
+    prometheus: [300, 690, 270, 265]
+    postgres: [300, 970, 270, 320]
     configuration: [620, 1110, 685, 190]
     vllm_small: [1420, 225, 370, 145]
     vllm_large: [1420, 385, 370, 145]
