@@ -531,7 +531,9 @@ def test_shutdown_saves_pending_interventions() -> None:
     assert list(store.interventions) == [intervention(0)]
 
 
-def release_event(minute: int, backend: str, action: str, version: str) -> ReleaseEvent:
+def release_event(
+    minute: int, backend: str, action: str, version: str, revision: int = 0
+) -> ReleaseEvent:
     return ReleaseEvent(
         at=datetime(2026, 11, 23, 12, minute, tzinfo=UTC),
         backend=backend,  # type: ignore[arg-type]
@@ -541,6 +543,7 @@ def release_event(minute: int, backend: str, action: str, version: str) -> Relea
         rollback_target="base" if action == "deployed" else None,
         actor="operator",
         reason=f"step {minute}",
+        revision=revision or minute + 1,
     )
 
 
@@ -562,6 +565,23 @@ def test_release_events_keep_order_and_the_latest_per_model(
         assert await store.recent_release_events(2) == events[1:]
         latest = await store.latest_release_events()
         assert sorted(latest, key=lambda e: e.backend) == [events[2], events[1]]
+
+    run(make_store(), body)
+
+
+def test_the_highest_revision_wins_and_repeats_are_ignored(
+    make_store: MakeStore,
+) -> None:
+    older = release_event(0, "qwen3-1.7b", "deployed", "v2-good", revision=1)
+    newer = release_event(1, "qwen3-1.7b", "rolled_back", "base", revision=2)
+
+    async def body(store: Store) -> None:
+        # Written newest first, as a late write can land.
+        await store.save_release_events([newer])
+        await store.save_release_events([older])
+        await store.save_release_events([newer])  # a retried write
+        assert await store.latest_release_events() == [newer]
+        assert len(await store.recent_release_events(10)) == 2
 
     run(make_store(), body)
 

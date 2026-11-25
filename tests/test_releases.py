@@ -438,20 +438,20 @@ def test_an_operator_ack_matches_storage_when_a_call_finishes_during_save(tmp_pa
         finally:
             store.resume.set()
         ack = await asyncio.wait_for(deploy, 1)
-        # The deploy was planned again on the confirmed state and saved again,
-        # after the confirmation, before the operator got the answer.
+        # The deploy was planned again on the confirmed state, with a newer
+        # revision than the confirmation, and saved before the answer.
         saved = (await store.latest_release_events())[0]
         assert (ack.version, ack.rollback_target) == (
             saved.version,
             saved.rollback_target,
         )
         assert saved.rollback_target == "v2-good"
-        assert [e.action for e in store.release_events][-2:] == [
-            "confirmed",
-            "deployed",
-        ]
         assert (await old_chat).trace.simulated_latency_ms == 1
         await gateway.finish_saves()
+        revisions = {e.action: e.revision for e in list(store.release_events)[-3:]}
+        stale, again = (e for e in store.release_events if e.version == "v2-outage")
+        assert stale.revision < revisions["confirmed"] < again.revision
+        assert (await store.latest_release_events())[0] == again
         assert gateway.releases.state[SMALL].watched_samples == 0
 
     asyncio.run(main())
@@ -471,10 +471,13 @@ def test_waiting_controller_events_are_saved_before_a_deploy(tmp_path):
         store.fail = False
         deploy(client, "v2-good")
         chat(client)
-        assert [(e.action, e.version) for e in store.release_events] == [
-            ("deployed", "v2-bad-format"),
-            ("rolled_back", "base"),
-            ("deployed", "v2-good"),
+        # Written out of order, but the revisions keep the gateway's order.
+        assert sorted(
+            (e.revision, e.action, e.version) for e in store.release_events
+        ) == [
+            (1, "deployed", "v2-bad-format"),
+            (2, "rolled_back", "base"),
+            (3, "deployed", "v2-good"),
         ]
     with TestClient(create_app(settings, store=store)) as client:
         small = releases(client)[SMALL]
@@ -490,7 +493,11 @@ def test_a_failed_deploy_save_keeps_waiting_events(tmp_path):
             chat(client)
         assert deploy(client, "v2-good").status_code == 503
         gateway = client.app.state.gateway  # type: ignore[attr-defined]
-        assert [e.action for e in gateway.releases.unsaved] == ["rolled_back"]
+        # The controller's rollback, then the release the model kept.
+        assert [(e.action, e.actor) for e in gateway.releases.unsaved] == [
+            ("rolled_back", "controller"),
+            ("rolled_back", "operator"),
+        ]
         assert releases(client)[SMALL]["version"] == "base"
 
 
@@ -793,10 +800,12 @@ class LateStore(MemoryStore):
     def __init__(self, readable: bool = True) -> None:
         super().__init__(100)
         self.readable = readable
+        self.late = True
 
     async def save_release_events(self, items: Sequence[ReleaseEvent]) -> None:
         await super().save_release_events(items)
-        await asyncio.sleep(1)
+        if self.late:
+            await asyncio.sleep(1)
 
     async def latest_release_events(self) -> list[ReleaseEvent]:
         if not self.readable:
@@ -816,11 +825,71 @@ def test_a_save_that_answers_late_is_read_back(tmp_path):
         assert releases(client)[SMALL]["version"] == "v2-bad-format"
 
 
-def test_a_save_that_cannot_be_read_back_says_so(tmp_path):
+def test_an_unconfirmed_save_agrees_live_and_after_a_restart(tmp_path):
+    """Review 3 of #107: the write lands but answers late, and the read-back
+    fails. The operator is told the change was not made; the running gateway
+    keeps the old release; and once the store answers, a restart keeps it too,
+    though the store holds the disputed change."""
     store = LateStore(readable=False)
     settings = make_settings(tmp_path, store_timeout_seconds=0.1)
     with TestClient(create_app(settings, store=store)) as client:
         response = deploy(client, "v2-bad-format")
         assert response.status_code == 503
-        assert "Could not confirm" in response.json()["detail"]
+        assert "so it was not made" in response.json()["detail"]
         assert releases(client)[SMALL]["version"] == "base"
+        # The disputed change is in the store, below the kept release.
+        saved = [(e.version, e.revision) for e in store.release_events]
+        assert saved[0] == ("v2-bad-format", 1)
+        store.readable = True
+        store.late = False
+        chat(client)  # the store answers again; the kept release is saved
+        assert releases(client)[SMALL]["version"] == "base"
+    with TestClient(create_app(settings, store=store)) as client:
+        small = releases(client)[SMALL]
+        assert (small["version"], small["status"]) == ("base", "stable")
+        assert chat(client).json()["trace"]["format_check"] == "passed"
+    latest = asyncio.run(store.latest_release_events())
+    assert [(e.version, e.actor, e.revision) for e in latest] == [
+        ("base", "operator", 2)
+    ]
+
+
+class OneModelBlockingStore(MemoryStore):
+    """Holds release writes for the large model until `resume` is set."""
+
+    def __init__(self) -> None:
+        super().__init__(100)
+        self.entered = asyncio.Event()
+        self.resume = asyncio.Event()
+
+    async def save_release_events(self, items: Sequence[ReleaseEvent]) -> None:
+        if any(e.backend == LARGE for e in items):
+            self.entered.set()
+            await self.resume.wait()
+        await super().save_release_events(items)
+
+
+def test_a_rollback_chat_finishes_during_another_models_operator_save(tmp_path):
+    """Review 3 of #107: the chat that rolls the small model back, and its
+    saves, finish while a deploy to the large model is still being saved."""
+
+    async def main() -> None:
+        store = OneModelBlockingStore()
+        settings = make_settings(tmp_path)
+        g = Gateway(settings, MockJevRouter(settings.intents_path), store=store)
+        await g.deploy_release(SMALL, "v2-bad-format", "bad release")
+        pending = asyncio.create_task(g.deploy_release(LARGE, "v2-good", "slow"))
+        await asyncio.wait_for(store.entered.wait(), 1)
+        traces = [
+            (await asyncio.wait_for(g.chat(STANDARD), 0.5)).trace for _ in range(4)
+        ]
+        assert traces[-1].controller_action.startswith("rolled back qwen3-1.7b to base")
+        assert g.releases.state[SMALL].status == "rolled_back"
+        # The rollback and its intervention are saved, not stuck behind it.
+        assert g.releases.unsaved == []
+        assert [i.action for i in store.interventions] == ["rolled_back"]
+        assert not pending.done()
+        store.resume.set()
+        assert (await pending).version == "v2-good"
+
+    asyncio.run(main())

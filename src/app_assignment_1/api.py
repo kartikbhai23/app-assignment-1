@@ -39,9 +39,9 @@ from app_assignment_1.service import (
 from app_assignment_1.store import Store, create_store
 
 UNKNOWN_SAVE = (
-    "Could not confirm the release change was saved. The running gateway did "
-    "not change, but a restart may apply it; check release_history in "
-    "/v1/health"
+    "Could not confirm the release change was saved, so it was not made. The "
+    "gateway saves the release it kept as a newer change once the store "
+    "answers, so a restart keeps it too"
 )
 
 

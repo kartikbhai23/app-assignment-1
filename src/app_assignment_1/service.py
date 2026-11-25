@@ -83,9 +83,9 @@ class ReleaseNotSaved(Exception):
 
 
 class ReleaseSaveUnknown(Exception):
-    """The save failed and could not be read back: the running gateway did
-    not change, but the store may hold the change, and a restart would
-    apply it."""
+    """The save failed and could not be read back. The change was not made;
+    the release the model kept waits to be saved as a newer change, so a
+    restart after that keeps it too."""
 
 
 # How often an operator change is planned again when the controller changes
@@ -337,14 +337,16 @@ class Gateway:
     async def _plan_save_apply(
         self, name: BackendName, plan: Callable[[], ReleaseEvent]
     ) -> None:
-        """Plan, save, then apply. A change the store does not have would be
-        undone by a restart, so a failed save changes nothing.
+        """Plan, save, then apply, so the operator's answer, the running
+        gateway and a restart agree.
 
-        The save is the only await. If the controller rolls back or confirms
-        the model meanwhile, the change is planned again on the new state and
-        saved again, after the controller's event, so the answer the operator
-        gets is what the store holds. Each controller change ends a watch, so
-        this repeats at most a few times."""
+        Every change carries a revision, taken when it is planned, and a
+        restart loads the highest saved one per model. The save is the only
+        await. If the controller rolls back or confirms the model meanwhile,
+        its event gets the higher revision, so the stale operator event can
+        never win a restart; the change is planned again on the new state, with
+        a newer revision, and saved again. Each controller change ends a watch,
+        so this repeats at most a few times."""
         for _ in range(MAX_RELEASE_REPLANS):
             event = plan()
             before = self.releases.state[name]
@@ -362,36 +364,44 @@ class Gateway:
         raise ReleaseNotSaved
 
     async def _save_release_change(self, event: ReleaseEvent) -> None:
-        """Save the controller events still waiting, then `event`, in one
-        write. A write that fails or times out is read back: it may have been
-        saved anyway. Raises ReleaseNotSaved or ReleaseSaveUnknown."""
-        async with self.save_lock:
-            waiting = self.releases.unsaved
-            self.releases.unsaved = []
-            try:
-                await asyncio.wait_for(
-                    self.store.save_release_events([*waiting, event]),
-                    self.store_timeout,
-                )
-                return
-            except Exception as exc:
-                logger.warning("Could not save release change (%s)", type(exc).__name__)
-            try:
-                latest = await asyncio.wait_for(
-                    self.store.latest_release_events(), self.store_timeout
-                )
-            except Exception as exc:
-                # Unknown: keep the waiting events, so they are saved again.
-                self.releases.unsaved = waiting + self.releases.unsaved
-                logger.warning(
-                    "Could not read the release change back (%s)", type(exc).__name__
-                )
-                raise ReleaseSaveUnknown from None
-            if event in latest:
-                logger.info("Release change was saved despite the error")
-                return
-            self.releases.unsaved = waiting + self.releases.unsaved
-            raise ReleaseNotSaved
+        """Save one operator change. It does not take save_lock, so chats and
+        their saves never wait for it; revisions, not write order, decide what
+        a restart loads.
+
+        A write that fails or times out may have been saved anyway. It is read
+        back: if the store has it, the change goes ahead. Otherwise the change
+        is not made, and the release the model kept is queued as a newer
+        change, so even a write that lands late can't win a restart. Raises
+        ReleaseNotSaved, or ReleaseSaveUnknown if the read-back fails too."""
+        try:
+            await asyncio.wait_for(
+                self.store.save_release_events([event]), self.store_timeout
+            )
+            return
+        except Exception as exc:
+            logger.warning("Could not save release change (%s)", type(exc).__name__)
+        try:
+            latest = await asyncio.wait_for(
+                self.store.latest_release_events(), self.store_timeout
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not read the release change back (%s)", type(exc).__name__
+            )
+            self._keep_release(event)
+            raise ReleaseSaveUnknown from None
+        if event in latest:
+            logger.info("Release change was saved despite the error")
+            return
+        self._keep_release(event)
+        raise ReleaseNotSaved
+
+    def _keep_release(self, event: ReleaseEvent) -> None:
+        current = self.releases.state[event.backend].version
+        self.releases.kept(
+            event.backend,
+            f"change to {event.version} not confirmed as saved; kept {current}",
+        )
 
     async def restore_releases(self) -> None:
         """At startup: serve the release each model had before the restart. A

@@ -229,6 +229,9 @@ class ReleaseEvent(StrictModel):
     actor: ReleaseActor
     # Public through /v1/health; never put customer data here.
     reason: str = Field(min_length=1, max_length=300)
+    # Per model, one higher for each change, in the order the gateway made
+    # them. A restart loads the highest, whatever order the writes landed in.
+    revision: int = Field(ge=1)
 
 
 class ReleaseRequest(StrictModel):

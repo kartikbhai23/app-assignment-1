@@ -70,7 +70,8 @@ class Store(Protocol):
         ...
 
     async def latest_release_events(self) -> list[ReleaseEvent]:
-        """The newest release change of each model: what it served last."""
+        """The release change with the highest revision for each model: what
+        it served last. Saving a change already saved is a no-op."""
         ...
 
 
@@ -86,6 +87,7 @@ class MemoryStore:
         self.release_events: deque[ReleaseEvent] = deque(maxlen=RELEASE_EVENT_LIMIT)
         # Kept apart from the bounded history, so it never loses a model.
         self.latest_releases: dict[str, ReleaseEvent] = {}
+        self.saved_revisions: set[tuple[str, int]] = set()
 
     async def open(self) -> None:
         pass
@@ -114,9 +116,15 @@ class MemoryStore:
         return list(self.interventions)[-limit:] if limit > 0 else []
 
     async def save_release_events(self, items: Sequence[ReleaseEvent]) -> None:
-        self.release_events.extend(items)
         for item in items:
-            self.latest_releases[item.backend] = item
+            key = (item.backend, item.revision)
+            if key in self.saved_revisions:
+                continue  # already saved, as ON CONFLICT DO NOTHING
+            self.saved_revisions.add(key)
+            self.release_events.append(item)
+            latest = self.latest_releases.get(item.backend)
+            if latest is None or item.revision > latest.revision:
+                self.latest_releases[item.backend] = item
 
     async def recent_release_events(self, limit: int) -> list[ReleaseEvent]:
         return list(self.release_events)[-limit:] if limit > 0 else []
@@ -269,8 +277,9 @@ class PostgresStore:
                 await cur.executemany(
                     """
                     INSERT INTO model_releases (at, backend, action, version,
-                        from_version, rollback_target, actor, reason)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        from_version, rollback_target, actor, reason, revision)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (backend, revision) DO NOTHING
                     """,
                     [
                         (
@@ -282,6 +291,7 @@ class PostgresStore:
                             e.rollback_target,
                             e.actor,
                             e.reason,
+                            e.revision,
                         )
                         for e in items
                     ],
@@ -305,7 +315,7 @@ class PostgresStore:
             cur = await conn.execute(
                 f"""
                 SELECT DISTINCT ON (backend) {RELEASE_COLUMNS}
-                FROM model_releases ORDER BY backend, seq DESC
+                FROM model_releases ORDER BY backend, revision DESC
                 """
             )
             rows = await cur.fetchall()
@@ -313,7 +323,8 @@ class PostgresStore:
 
 
 RELEASE_COLUMNS = (
-    "at, backend, action, version, from_version, rollback_target, actor, reason"
+    "at, backend, action, version, from_version, rollback_target, actor, reason,"
+    " revision"
 )
 
 

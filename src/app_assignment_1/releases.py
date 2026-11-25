@@ -107,9 +107,17 @@ class Releases:
         # it started with, so an outcome from an older version is not counted
         # against the new one.
         self.generation: dict[BackendName, int] = dict.fromkeys(self.backends, 0)
+        # The last release revision handed out per model (see ReleaseEvent).
+        # Taken when an event is planned, so an operator change planned
+        # before a controller change always has the lower number.
+        self.revision: dict[BackendName, int] = dict.fromkeys(self.backends, 0)
         # Called after every change, with the event. The gateway starts or
         # ends the controller's watch and resets the monitor windows.
         self.on_change: list[Callable[[ReleaseEvent], None]] = []
+
+    def _next_revision(self, name: BackendName) -> int:
+        self.revision[name] += 1
+        return self.revision[name]
 
     def versions(self, name: BackendName) -> list[str]:
         return [BASE_VERSION, *self.catalog.get(name, {})]
@@ -151,6 +159,7 @@ class Releases:
             rollback_target=target,
             actor="operator",
             reason=reason,
+            revision=self._next_revision(name),
         )
 
     def plan_rollback(
@@ -168,6 +177,7 @@ class Releases:
             rollback_target=None,
             actor=actor,
             reason=reason,
+            revision=self._next_revision(name),
         )
 
     def roll_back(self, name: BackendName, reason: str) -> str | None:
@@ -196,9 +206,34 @@ class Releases:
             rollback_target=current.rollback_target,
             actor="controller",
             reason=f"{self.watch_samples} calls below the failure threshold",
+            revision=self._next_revision(name),
         )
         self.apply(event)
         self.unsaved.append(event)
+
+    def kept(self, name: BackendName, reason: str) -> None:
+        """Record, as a newer change, the release the model kept after an
+        operator change whose save could not be confirmed. Once saved, it
+        outranks that change if the store has it, so a restart serves what
+        the operator was told: the change was not made."""
+        current = self.state[name]
+        action = {
+            "watching": "deployed",
+            "stable": "confirmed",
+            "rolled_back": "rolled_back",
+        }[current.status]
+        self.unsaved.append(
+            ReleaseEvent(
+                at=datetime.now(UTC),
+                backend=name,
+                action=action,  # type: ignore[arg-type]
+                version=current.version,
+                rollback_target=current.rollback_target,
+                actor="operator",
+                reason=reason,
+                revision=self._next_revision(name),
+            )
+        )
 
     def watched(self, name: BackendName, samples: int) -> None:
         self.state[name].watched_samples = samples
@@ -235,6 +270,9 @@ class Releases:
         for event in latest:
             if event.backend not in self.backends:
                 continue
+            self.revision[event.backend] = max(
+                self.revision[event.backend], event.revision
+            )
             known = event.version in self.versions(event.backend) and (
                 event.rollback_target is None
                 or event.rollback_target in self.versions(event.backend)
