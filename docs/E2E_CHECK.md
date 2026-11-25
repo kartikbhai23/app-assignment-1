@@ -11,6 +11,7 @@ python3 scripts/e2e_check.py --base-url http://localhost:8080
 - Each reply passes the format check, contains its policy facts, and can be read back from `GET /v1/requests/{id}`.
 - The serving model matches the final route in the trace. When that route differs from the one Jev picked, the trace must include a backend fallback reason. Failed calls in `/v1/health` must not rise during the run, so a down model is caught even when requests are rerouted.
 - `GET /v1/health` before and after: both models answered at least one check message, completed calls and monitor samples grew, no model is disabled by the controller, no new interventions, status is `ok`. With real Jev, the Jev breaker is closed.
+- With real Jev (`jev_mode` is `real`), each trace must say the router was `jev`. A reply routed by the rule router fails the check and shows its fallback reason, so a silent Jev fallback no longer hides behind a passing run.
 - Prometheus counters, when you give it a metrics source: `gateway_chat_requests` and `gateway_backend_calls_completed` rose by at least the number of messages sent (more means other clients sent traffic too; a quiet stack gives the cleanest read), and the monitor gauges are exported.
 
 ## Mock run and real run

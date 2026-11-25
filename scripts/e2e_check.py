@@ -152,7 +152,7 @@ def run(base, metrics_url=None, metrics_cmd=None):
     if metrics_url or metrics_cmd:
         try:
             metrics_start = read_metrics(metrics_url, metrics_cmd)
-        except (URLError, OSError, subprocess.SubprocessError) as exc:
+        except (URLError, OSError, ValueError, subprocess.SubprocessError) as exc:
             results.check(False, "metrics source reachable", type(exc).__name__)
 
     sent = {}
@@ -195,6 +195,17 @@ def run(base, metrics_url=None, metrics_cmd=None):
             results.check(
                 bool(reasons & BACKEND_MOVEMENT_REASONS),
                 f"{name}: movement from {first_route} has a backend fallback reason",
+            )
+        if jev_mode == "real":
+            # A rule-router answer means Jev failed, gave an invalid route or
+            # the breaker skipped it: the run did not exercise real Jev.
+            results.check(
+                trace["router"] == "jev",
+                f"{name}: routed by real Jev",
+                f"router {trace['router']}, fallback reason: "
+                f"{trace.get('fallback_reason')}"
+                if trace["router"] != "jev"
+                else "",
             )
         results.check(
             all(fact in result["reply"] for fact in result["policy_facts"]),
@@ -291,7 +302,7 @@ def run(base, metrics_url=None, metrics_cmd=None):
     if metrics_start:
         try:
             metrics_end = read_metrics(metrics_url, metrics_cmd)
-        except (URLError, OSError, subprocess.SubprocessError) as exc:
+        except (URLError, OSError, ValueError, subprocess.SubprocessError) as exc:
             results.check(
                 False, "metrics source reachable at the end", type(exc).__name__
             )

@@ -202,3 +202,29 @@ def test_real_run_fails_if_it_never_exercises_small(e2e, monkeypatch, tmp_path, 
         monkeypatch.setattr(e2e, "get_json", as_real)
         assert e2e.run("http://test").failed == 1
     assert "FAIL: coverage: qwen3-1.7b" in capsys.readouterr().out
+
+
+def test_real_jev_run_fails_when_router_fell_back(e2e, monkeypatch, tmp_path, capsys):
+    with TestClient(create_app(settings_for(tmp_path))) as client:
+        serve(e2e, monkeypatch, client)
+        plain = e2e.get_json
+
+        def as_real_jev(base, path, payload=None, timeout=90):
+            body = plain(base, path, payload, timeout)
+            if path == "/v1/health":
+                body["jev_mode"] = "real"
+            return body
+
+        monkeypatch.setattr(e2e, "get_json", as_real_jev)
+        results = e2e.run("http://test")
+    out = capsys.readouterr().out
+    # The mock router answered, so none of the seven replies came from real Jev.
+    assert results.failed >= 7
+    assert "routed by real Jev (router mock_jev" in out
+
+
+def test_unbalanced_quote_in_metrics_cmd_is_a_fail_line(e2e, monkeypatch, tmp_path):
+    with TestClient(create_app(settings_for(tmp_path))) as client:
+        serve(e2e, monkeypatch, client)
+        results = e2e.run("http://test", metrics_cmd="echo 'oops")
+    assert results.failed >= 1
