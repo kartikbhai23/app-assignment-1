@@ -14,7 +14,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from app_assignment_1.backends import Backend, MockBackend
 from app_assignment_1.breaker import CircuitBreaker
-from app_assignment_1.config import Settings
+from app_assignment_1.config import Settings, settings_version
 from app_assignment_1.intents import load_intents
 from app_assignment_1.labels import UNKNOWN, load_labels
 from app_assignment_1.metrics import GatewayMetrics
@@ -88,11 +88,18 @@ def _jev_error_type(exc: Exception) -> str:
 
 
 def _assessment(
-    call: dict[str, Any], question: Literal["route", "intent"], answer: JevAnswer
+    call: dict[str, Any],
+    question: Literal["route", "intent"],
+    answer: JevAnswer,
+    option_order: list[str] | None = None,
 ) -> JevAssessment:
     if answer.error_type is not None:
         return JevAssessment(
-            **call, question=question, status="error", error_type=answer.error_type
+            **call,
+            question=question,
+            status="error",
+            error_type=answer.error_type,
+            option_order=option_order,
         )
     return JevAssessment(
         **call,
@@ -101,6 +108,7 @@ def _assessment(
         choice=answer.choice,
         confidence=answer.confidence,
         probabilities=answer.probabilities,
+        option_order=option_order,
     )
 
 
@@ -179,6 +187,8 @@ class Gateway:
         self.semantic = SemanticMonitor(
             (b.config.name for b in self.backends), settings
         )
+        self.settings = settings
+        self.settings_version = self._settings_version()
         if settings.semantic_actions_enabled:
             # A re-enabled model starts both windows again, or one old run of
             # disagreements would disable it on its next reply. With actions
@@ -247,6 +257,16 @@ class Gateway:
     def operator_enable(self, name: BackendName, reason: str) -> None:
         self.controller.operator_enable(name, reason)
 
+    def _settings_version(self) -> str:
+        """The models' live config stands in for backends.json, so a fault
+        set through /v1/faults gives later requests a new ID."""
+        s = self.settings
+        return settings_version(
+            s,
+            (s.intents_path, s.labels_path, s.policy_cards_path),
+            [b.config.model_dump(mode="json") for b in self.backends],
+        )
+
     def set_fault(self, request: FaultRequest) -> BackendConfig:
         """Change a mock model's simulated fault rates while it runs."""
         backend = self.backend(request.model)
@@ -261,6 +281,7 @@ class Gateway:
             config.fault_rate = request.rate
         else:
             config.label_swap_rate = request.rate
+        self.settings_version = self._settings_version()
         logger.info(
             "Operator set fault %s=%s on %s", request.fault, request.rate, request.model
         )
@@ -436,7 +457,9 @@ class Gateway:
                     "output_tokens": result.output_tokens,
                 }
                 records = [
-                    _assessment(call, "route", result.route),
+                    _assessment(
+                        call, "route", result.route, option_order=result.route_order
+                    ),
                     _assessment(call, "intent", result.intent),
                 ]
             check_call(records)
@@ -687,6 +710,7 @@ class Gateway:
                 format_errors=format_errors,
                 fallback_reason=", ".join(reasons) or None,
                 controller_action=action,
+                settings_version=self.settings_version,
             ),
         )
         trace = response.trace
