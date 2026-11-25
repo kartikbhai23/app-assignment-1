@@ -32,6 +32,7 @@ Smart AI Gateway (DSAN 6700 final project): a FastAPI gateway that routes bankin
 - `tests/`: pytest suite. Frontend tests are in `frontend/src/App.test.jsx`.
 - `scripts/smoke_compose.py`: smoke test against the public proxy.
 - `scripts/probe_false_pass.py`: simulates how often the probe gate passes with no signal (see `docs/PROBE.md`).
+- `scripts/export_analysis.py`: exports requests and Jev assessments from Postgres as JSON Lines for analysis, without reply text.
 - `scripts/jev_live_check.py`: the B6 live Jev check, run by hand with a TypeSafe key. `sample` draws messages from the Banking77 training split, `run` calls Jev once per message, and `summarize` prints the measurements. Its logs keep no message text.
 - `scripts/chaos_demo.py`: live chaos demo; injects the three faults through `/v1/faults` into a stack started with `compose.demo.yml` and prints what the controller did. Runbook: `docs/CHAOS_DEMO.md`.
 - `scripts/render_architecture.py`: draws `docs/architecture.svg` from `docs/architecture.yaml`; `--check` fails if they differ.
@@ -40,6 +41,7 @@ Smart AI Gateway (DSAN 6700 final project): a FastAPI gateway that routes bankin
 - `compose.gpu.yml`: a separate Compose project for the GPU host. `vllm-small` (Qwen3-1.7B, port 8001) and `vllm-large` (Qwen3-4B, port 8002), with pinned vLLM and model revisions. The model cache is a host directory, `MODEL_CACHE_DIR` (an attached volume on Jetstream2). Each binds only to `VLLM_BIND_IP` from `env/gpu.env` and requires the bearer key `VLLM_API_KEY` on `/v1`; all three settings are required (template `env/gpu.env.example`; the real file is ignored by git). `tests/test_compose_ports.py` checks the port rules.
 - `Caddyfile`: serves the React app on port 8080 and proxies `/v1`, `/docs`, `/redoc` and `/openapi.json` to the gateway. Never add `/metrics`.
 - `prometheus/prometheus.yml`: Prometheus scrape config; scrapes `gateway:8000/metrics` on the Compose network.
+- `docs/CHAOS_SCENARIOS.md`: the planned chaos scenarios, what each injects, what the gateway should do and what to measure. A plan; nothing in it is measured unless it says so.
 - `docs/TEAM_PLAN.md`: who owns what. `USER_BRIEF.md`: guide for beta testers.
 - `docs/architecture.yaml`: what is built, simulated or planned in each part of the architecture, and who owns it. `docs/architecture.svg` is generated from it.
 
