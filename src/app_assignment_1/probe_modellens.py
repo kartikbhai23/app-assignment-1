@@ -75,10 +75,12 @@ class ModelLensExtractor:
         device: str | None = None,
         pool: Callable[[Any, str], Any] | None = None,
         system_prompt: str | None = None,
+        to_batch: Callable[[list[int]], Any] | None = None,
     ):
         """`system_prompt` is the system message the gateway sent with the
         message (see `gateway_system_prompt`); None leaves it out. `pool`
-        defaults to ModelLens's probe pooling; tests pass a fake."""
+        defaults to ModelLens's probe pooling, and `to_batch` (token IDs to a
+        batch of one) to a transformers `BatchEncoding`; tests pass fakes."""
         if layer < 0:
             raise ValueError("layer must be 0 or more.")
         if pooling not in POOLINGS:
@@ -90,6 +92,7 @@ class ModelLensExtractor:
         self.device = device
         self.pool = pool
         self.system_prompt = system_prompt
+        self.to_batch = to_batch
         self.layer_name = LAYER_NAME.format(layer=layer)
         if self.layer_name not in lens.layer_names():
             raise ValueError(f"Layer '{self.layer_name}' not found.")
@@ -129,13 +132,13 @@ class ModelLensExtractor:
             lens, tokenizer, layer, pooling, device, system_prompt=system_prompt or None
         )
 
-    def format_text(self, prompt: str, reply: str) -> str:
-        """The text the model read when it wrote `reply`.
+    def format_parts(self, prompt: str, reply: str) -> tuple[str, str]:
+        """The prompt text the model read, and the reply it generated.
 
-        With a chat template, this is the template applied to the system and
-        user messages with the generation prompt, followed by `reply`. Pass
-        the reply exactly as the model generated it (the raw completion,
-        including any thinking block), so the tokens match.
+        With a chat template, the prompt is the template applied to the
+        system and user messages with the generation prompt. Pass the reply
+        exactly as the model generated it (the raw completion, including any
+        thinking block).
         """
         messages = [{"role": "user", "content": prompt}]
         if self.system_prompt:
@@ -147,11 +150,30 @@ class ModelLensExtractor:
                 add_generation_prompt=True,
                 **CHAT_TEMPLATE_KWARGS,
             )
-            return prefix + reply
-        return "\n".join(message["content"] for message in messages) + "\n" + reply
+            return prefix, reply
+        return "\n".join(m["content"] for m in messages) + "\n", reply
+
+    def format_text(self, prompt: str, reply: str) -> str:
+        """The prompt and reply as one string, for reading."""
+        return "".join(self.format_parts(prompt, reply))
+
+    def token_ids(self, prompt: str, reply: str) -> list[int]:
+        """Prompt tokens followed by reply tokens.
+
+        The two parts are tokenized separately, the way vLLM saw them: the
+        prompt as one sequence, then the generated tokens. Tokenizing the
+        joined string could merge tokens across the boundary. Re-encoding
+        the reply text can still differ from the IDs the model generated;
+        only IDs captured from vLLM would match exactly.
+        """
+        prefix, reply = self.format_parts(prompt, reply)
+        ids: list[int] = []
+        for part in (prefix, reply):
+            ids.extend(self.tokenizer(part, add_special_tokens=False)["input_ids"])
+        return ids
 
     def extract(self, prompt: str, reply: str) -> list[float]:
-        tokens = self.tokenizer(self.format_text(prompt, reply), return_tensors="pt")
+        tokens = (self.to_batch or _to_batch)(self.token_ids(prompt, reply))
         if self.device is not None:
             tokens = tokens.to(self.device)
         self.lens.attach_layers([self.layer_name])
@@ -175,6 +197,16 @@ def gateway_system_prompt() -> str:
         settings.policy_cards_path.read_text()
     )
     return build_system_prompt(load_labels(settings.labels_path), cards)
+
+
+def _to_batch(ids: list[int]) -> Any:
+    """Token IDs as a batch of one, with tensors and an attention mask."""
+    try:
+        transformers = importlib.import_module("transformers")
+    except ImportError as error:
+        raise ImportError(MISSING_EXTRA) from error
+    data = {"input_ids": [ids], "attention_mask": [[1] * len(ids)]}
+    return transformers.BatchEncoding(data, tensor_type="pt")
 
 
 def _modellens_pool() -> Callable[[Any, str], Any]:

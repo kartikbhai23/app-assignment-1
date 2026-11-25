@@ -56,9 +56,14 @@ class FakeTokenizer:
             text += "<|im_start|>assistant\n"
         return text
 
-    def __call__(self, text, return_tensors):
-        assert return_tensors == "pt"
-        return FakeTokens(text)
+    def __call__(self, text, add_special_tokens):
+        # One "token" per character, so ids join back into the text.
+        assert add_special_tokens is False
+        return {"input_ids": list(text)}
+
+
+def fake_batch(ids):
+    return FakeTokens("".join(ids))
 
 
 class FakeActivation:
@@ -103,7 +108,7 @@ class FakeLens:
 
 def test_extractor_reads_the_named_layer():
     extractor = ModelLensExtractor(
-        FakeLens(), FakeTokenizer(), layer=14, pool=fake_pool
+        FakeLens(), FakeTokenizer(), layer=14, pool=fake_pool, to_batch=fake_batch
     )
     assert extractor.layer_name == "model.layers.14"
     assert extractor.mocked is False
@@ -130,13 +135,15 @@ def test_bad_settings_are_rejected(layer, pooling):
 
 
 def test_last_pooling_reads_the_final_token():
-    extractor = ModelLensExtractor(FakeLens(), FakeTokenizer(), layer=3, pool=fake_pool)
+    extractor = ModelLensExtractor(
+        FakeLens(), FakeTokenizer(), layer=3, pool=fake_pool, to_batch=fake_batch
+    )
     assert extractor.extract("hi", "ok") == [float(ord("k")), 1.0]
 
 
 def test_mean_pooling_averages_tokens():
     extractor = ModelLensExtractor(
-        FakeLens(), FakeTokenizer(), 3, "mean", pool=fake_pool
+        FakeLens(), FakeTokenizer(), 3, "mean", pool=fake_pool, to_batch=fake_batch
     )
     # "a\nc": codes 97, 10, 99.
     assert extractor.extract("a", "c") == [(97 + 10 + 99) / 3, 1.0]
@@ -144,7 +151,12 @@ def test_mean_pooling_averages_tokens():
 
 def test_chat_template_matches_what_the_gateway_sent():
     extractor = ModelLensExtractor(
-        FakeLens(), FakeTokenizer("t"), 0, pool=fake_pool, system_prompt="rules"
+        FakeLens(),
+        FakeTokenizer("t"),
+        0,
+        pool=fake_pool,
+        to_batch=fake_batch,
+        system_prompt="rules",
     )
     assert extractor.format_text("q", '{"intent": "x"}') == (
         "<|im_start|>system\nrules<|im_end|>\n"
@@ -155,14 +167,47 @@ def test_chat_template_matches_what_the_gateway_sent():
 
 def test_last_pooling_lands_on_the_reply_not_the_template():
     extractor = ModelLensExtractor(
-        FakeLens(), FakeTokenizer("t"), 0, pool=fake_pool, system_prompt="rules"
+        FakeLens(),
+        FakeTokenizer("t"),
+        0,
+        pool=fake_pool,
+        to_batch=fake_batch,
+        system_prompt="rules",
     )
     # The fake lens makes one row per character; the last is the reply's "}".
     assert extractor.extract("q", '{"intent": "x"}') == [float(ord("}")), 1.0]
 
 
+def test_prompt_and_reply_are_tokenized_separately():
+    seen = []
+    tokenizer = FakeTokenizer("t")
+    call = tokenizer.__call__
+
+    class Recording(FakeTokenizer):
+        def __call__(self, text, add_special_tokens):
+            seen.append(text)
+            return call(text, add_special_tokens)
+
+    recording = Recording("t")
+    extractor = ModelLensExtractor(
+        FakeLens(),
+        recording,
+        0,
+        pool=fake_pool,
+        to_batch=fake_batch,
+        system_prompt="rules",
+    )
+    prefix, reply = extractor.format_parts("q", "{}")
+    assert reply == "{}"
+    assert prefix.endswith("<|im_start|>assistant\n")
+    assert extractor.token_ids("q", "{}") == list(prefix + reply)
+    assert seen == [prefix, "{}"]
+
+
 def test_no_system_prompt_without_one():
-    extractor = ModelLensExtractor(FakeLens(), FakeTokenizer(), 0, pool=fake_pool)
+    extractor = ModelLensExtractor(
+        FakeLens(), FakeTokenizer(), 0, pool=fake_pool, to_batch=fake_batch
+    )
     assert extractor.format_text("q", "a") == "q\na"
 
 
@@ -176,7 +221,12 @@ def test_gateway_system_prompt_lists_every_label():
 def test_tokens_move_to_the_device():
     lens = FakeLens()
     extractor = ModelLensExtractor(
-        lens, FakeTokenizer(), layer=0, device="cuda", pool=fake_pool
+        lens,
+        FakeTokenizer(),
+        layer=0,
+        device="cuda",
+        pool=fake_pool,
+        to_batch=fake_batch,
     )
     extractor.extract("q", "a")
     assert lens.ran.device == "cuda"
@@ -186,14 +236,18 @@ def test_non_finite_activations_raise():
     def nan_pool(activation, pooling):
         return [FakeVector([float("nan")])]
 
-    extractor = ModelLensExtractor(FakeLens(), FakeTokenizer(), 0, pool=nan_pool)
+    extractor = ModelLensExtractor(
+        FakeLens(), FakeTokenizer(), 0, pool=nan_pool, to_batch=fake_batch
+    )
     with pytest.raises(ValueError, match="finite"):
         extractor.extract("q", "a")
 
 
 def test_missing_activation_raises():
     lens = FakeLens()
-    extractor = ModelLensExtractor(lens, FakeTokenizer(), layer=0, pool=fake_pool)
+    extractor = ModelLensExtractor(
+        lens, FakeTokenizer(), layer=0, pool=fake_pool, to_batch=fake_batch
+    )
     lens.get_layer_activation = lambda name: None
     with pytest.raises(RuntimeError, match="No activation"):
         extractor.extract("q", "a")
@@ -210,7 +264,9 @@ def test_default_pool_explains_a_missing_extra(monkeypatch):
 
 
 def test_features_train_a_probe():
-    extractor = ModelLensExtractor(FakeLens(), FakeTokenizer(), layer=0, pool=fake_pool)
+    extractor = ModelLensExtractor(
+        FakeLens(), FakeTokenizer(), layer=0, pool=fake_pool, to_batch=fake_batch
+    )
     examples = [
         ProbeExample(prompt=f"m{i}", reply=r, correct=r == "z", token_confidence=0.5)
         for i in range(4)
