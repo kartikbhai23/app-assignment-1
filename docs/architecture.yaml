@@ -80,9 +80,9 @@ components:
     owner: "Verness · Yanzhen: vLLM client"
     items:
       - built: "Fallback with budgets; both down: 503"
-      - built: vLLM client with typed failures
-      - simulated: Gateway uses mocks
-      - todo: Gateway wiring; error codes
+      - built: vLLM client with error codes
+      - simulated: "Default: mocks"
+      - todo: First live run in the app
 
   format_validation:
     title: Format validation
@@ -98,7 +98,7 @@ components:
     items:
       - built: Outage, bad format and label swap, by Compose override
       - todo: Bad prompt
-      - built: POST /v1/faults with operator token
+      - built: "POST /v1/faults, and /faults/jev for mock Jev"
 
   jev_intent:
     title: Jev intent question
@@ -144,6 +144,7 @@ components:
     owner: Sebastian
     items:
       - built: "Requests, interventions and Jev assessments; survive a restart"
+      - built: "All requests kept, with settings version and route order; export"
       - built: Versioned SQL migrations at startup; no published port
       - todo: Reload monitor state, controller state, release history
       - simulated: "Tests and native runs: memory store, resets on restart"
@@ -156,7 +157,6 @@ components:
       - simulated: 10 intents and 10 policy cards
       - built: One 78-label file; replies only for the 10 carded intents
       - built: Jev key and model, vLLM URLs and key, operator token
-      - todo: Gateway reads the vLLM settings
       - todo: Prompt versions and rollback target; data/ splits and fresh set
 
   vllm_small:
@@ -166,7 +166,8 @@ components:
     items:
       - built: vLLM v0.33.0 with API key, private IP
       - built: Smoke test passes from CPU instance
-      - simulated: Gateway uses a keyword mock
+      - built: Gateway calls it in real mode
+      - simulated: "Default: keyword mock"
 
   vllm_large:
     title: vllm-large · Qwen3-4B
@@ -175,7 +176,8 @@ components:
     items:
       - built: vLLM v0.33.0 with API key, private IP
       - built: Smoke test passes from CPU instance
-      - simulated: Gateway uses a keyword mock
+      - built: Gateway calls it in real mode
+      - simulated: "Default: keyword mock"
 
   model_volume:
     title: Model volume
@@ -262,10 +264,10 @@ layout:
     semantic_monitor: [855, 850, 225, 205]
     controller: [1090, 850, 225, 205]
     prometheus: [300, 690, 270, 225]
-    postgres: [300, 930, 270, 260]
+    postgres: [300, 930, 270, 320]
     configuration: [620, 1110, 685, 190]
-    vllm_small: [1420, 225, 370, 140]
-    vllm_large: [1420, 385, 370, 140]
+    vllm_small: [1420, 225, 370, 145]
+    vllm_large: [1420, 385, 370, 145]
     model_volume: [1420, 545, 370, 105]
     jev_api: [1420, 840, 370, 190]
     probe: [1420, 1080, 370, 190]
