@@ -70,6 +70,8 @@ Notes:
 
 - The vector is the raw layer output. For the last layer, that is before the final norm, so it differs from the last entry of transformers' `hidden_states`.
 - `last` pooling takes the final position, so pass one example at a time (as `extract` does), not a padded batch.
+- `mean` averages over every token the model read, and the gateway's system prompt is most of them (about 7,500 characters, against a reply of about 100). The system prompt is the same for every request, so `mean` mostly measures it. A `mean` over the reply alone needs the reply's token offsets, like the intent-label position, and is not built.
+- The template must render the same text vLLM rendered. `CHAT_TEMPLATE_KWARGS` holds the `chat_template_kwargs` the backend sends, and a test compares the two. If the backend turns Qwen3's thinking off, set the same value here.
 - The proposed primary position, the last intent-label token, is not built yet. It needs the reply's token offsets.
 - Record the model revision, layer and pooling in `GateRunInfo`.
 

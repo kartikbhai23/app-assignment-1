@@ -1,8 +1,15 @@
 """ModelLensExtractor with a fake lens and tokenizer: no torch needed."""
 
+import asyncio
 import importlib
+import json
+from pathlib import Path
+from types import SimpleNamespace
 
+import httpx
 import pytest
+import yaml
+from pydantic import TypeAdapter
 
 from app_assignment_1 import probe_modellens
 from app_assignment_1.config import get_settings
@@ -13,6 +20,8 @@ from app_assignment_1.probe import (
     train_probe,
 )
 from app_assignment_1.probe_modellens import ModelLensExtractor, gateway_system_prompt
+from app_assignment_1.schemas import BackendConfig, PolicyCard
+from app_assignment_1.vllm import BackendCallError, VLLMBackend, build_system_prompt
 
 
 class FakeVector:
@@ -37,7 +46,7 @@ class FakeTokenizer:
     def __init__(self, chat_template=None):
         self.chat_template = chat_template
 
-    def apply_chat_template(self, messages, tokenize, add_generation_prompt):
+    def apply_chat_template(self, messages, tokenize, add_generation_prompt, **kwargs):
         # ChatML, the format Qwen3 uses.
         assert tokenize is False
         text = "".join(
@@ -223,3 +232,101 @@ def test_from_pretrained_explains_a_missing_extra(monkeypatch):
     monkeypatch.setattr(probe_modellens.importlib, "import_module", fake_import)
     with pytest.raises(ImportError, match="--extra probe"):
         ModelLensExtractor.from_pretrained(layer=0)
+
+
+def backend_request() -> dict:
+    """The JSON body the vLLM backend sends, captured without a server."""
+    settings = get_settings()
+    labels = load_labels(settings.labels_path)
+    cards = TypeAdapter(dict[str, PolicyCard]).validate_json(
+        settings.policy_cards_path.read_text()
+    )
+    sent: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.update(json.loads(request.content))
+        return httpx.Response(500)
+
+    async def run() -> None:
+        config = BackendConfig(name="qwen3-1.7b", route="standard", latency_ms=0)
+        async with httpx.AsyncClient(
+            base_url="http://vllm.test", transport=httpx.MockTransport(handler)
+        ) as client:
+            backend = VLLMBackend(
+                config,
+                client,
+                model="qwen3-1.7b",
+                system_prompt=build_system_prompt(labels, cards),
+                labels=labels,
+            )
+            with pytest.raises(BackendCallError):
+                await backend.generate("q")
+
+    asyncio.run(run())
+    return sent
+
+
+def test_system_prompt_is_byte_equal_to_what_the_backend_sends():
+    system = backend_request()["messages"][0]
+    assert system["role"] == "system"
+    assert system["content"] == gateway_system_prompt()
+
+
+def test_template_kwargs_match_what_the_backend_sends():
+    sent = backend_request().get("chat_template_kwargs", {})
+    assert probe_modellens.CHAT_TEMPLATE_KWARGS == sent
+
+
+def test_default_revision_is_the_one_vllm_serves():
+    compose = yaml.safe_load(Path("compose.gpu.yml").read_text())
+    command = compose["services"]["vllm-small"]["command"]
+    assert "--model=Qwen/Qwen3-1.7B" in command
+    assert f"--revision={probe_modellens.DEFAULT_REVISION}" in command
+    assert probe_modellens.DEFAULT_MODEL == "Qwen/Qwen3-1.7B"
+
+
+def test_from_pretrained_uses_the_gateway_defaults(monkeypatch):
+    loaded: dict = {}
+
+    class FakeModel:
+        def to(self, device):
+            loaded["device"] = device
+            return self
+
+    class Auto:
+        def __init__(self, result):
+            self.result = result
+
+        def from_pretrained(self, name, revision, **kwargs):
+            loaded.setdefault("calls", []).append((name, revision))
+            return self.result
+
+    tokenizer = FakeTokenizer()
+    transformers = SimpleNamespace(
+        AutoTokenizer=Auto(tokenizer), AutoModelForCausalLM=Auto(FakeModel())
+    )
+
+    class FakeAdapter:
+        def set_tokenizer(self, value):
+            loaded["tokenizer"] = value
+
+    def fake_lens(model, backend):
+        lens = FakeLens()
+        lens.adapter = FakeAdapter()
+        return lens
+
+    modules = {
+        "transformers": transformers,
+        "modellens": SimpleNamespace(ModelLens=fake_lens),
+    }
+    monkeypatch.setattr(probe_modellens.importlib, "import_module", modules.__getitem__)
+
+    extractor = ModelLensExtractor.from_pretrained(layer=3)
+    expected = ("Qwen/Qwen3-1.7B", probe_modellens.DEFAULT_REVISION)
+    assert loaded["calls"] == [expected, expected]
+    assert loaded["device"] == "cpu"
+    assert loaded["tokenizer"] is tokenizer
+    assert extractor.system_prompt == gateway_system_prompt()
+
+    no_system = ModelLensExtractor.from_pretrained(layer=3, system_prompt="")
+    assert no_system.system_prompt is None

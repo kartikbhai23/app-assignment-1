@@ -37,6 +37,12 @@ DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
 # The revision vLLM serves on the GPU host (compose.gpu.yml).
 DEFAULT_REVISION = "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
 
+# The chat_template_kwargs the vLLM backend sends with each request, so the
+# template renders the same text vLLM rendered. A test compares this with the
+# backend's request; keep the two equal (for example when the backend turns
+# thinking off with {"enable_thinking": False}).
+CHAT_TEMPLATE_KWARGS: dict[str, Any] = {}
+
 # Qwen3ForCausalLM names its decoder layers model.layers.0 to model.layers.27.
 LAYER_NAME = "model.layers.{layer}"
 
@@ -136,7 +142,10 @@ class ModelLensExtractor:
             messages.insert(0, {"role": "system", "content": self.system_prompt})
         if getattr(self.tokenizer, "chat_template", None):
             prefix: str = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                **CHAT_TEMPLATE_KWARGS,
             )
             return prefix + reply
         return "\n".join(message["content"] for message in messages) + "\n" + reply
