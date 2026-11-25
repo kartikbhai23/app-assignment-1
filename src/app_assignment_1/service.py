@@ -82,6 +82,17 @@ class ReleaseNotSaved(Exception):
     """An operator's release change could not be saved, so it was not made."""
 
 
+class ReleaseSaveUnknown(Exception):
+    """The save failed and could not be read back: the running gateway did
+    not change, but the store may hold the change, and a restart would
+    apply it."""
+
+
+# How often an operator change is planned again when the controller changes
+# the same model during its save.
+MAX_RELEASE_REPLANS = 5
+
+
 def _jev_error_type(exc: Exception) -> str:
     """A short code for a failed Jev call. Never the exception's message."""
     if isinstance(exc, TimeoutError):
@@ -200,7 +211,7 @@ class Gateway:
         self.controller.on_watched.append(self.releases.watched)
         self.controller.on_confirm.append(self.releases.confirm)
         self.releases.on_change.append(self._release_changed)
-        # Order controller release decisions with operator plan, save and apply.
+        # One operator release change at a time. The chat path never takes it.
         self.release_lock = asyncio.Lock()
         self.metrics = GatewayMetrics(self)
 
@@ -299,26 +310,61 @@ class Gateway:
         self, name: BackendName, version: str, reason: str
     ) -> ModelRelease:
         """Deploy a version to a model and start watching it. Raises
-        UnknownVersion, AlreadyServing or ReleaseNotSaved."""
-        async with self.release_lock:
-            event = self.releases.plan_deploy(name, version, reason)
-            await self._finish(self._save_and_apply(event))
+        UnknownVersion, AlreadyServing, ReleaseNotSaved or ReleaseSaveUnknown."""
+        await self._operator_change(
+            name, lambda: self.releases.plan_deploy(name, version, reason)
+        )
         return self.releases.state[name].model_copy()
 
     async def rollback_release(self, name: BackendName, reason: str) -> ModelRelease:
-        """Put a model back on its rollback target. Raises NoRollbackTarget or
-        ReleaseNotSaved."""
-        async with self.release_lock:
-            event = self.releases.plan_rollback(name, reason, "operator")
-            await self._finish(self._save_and_apply(event))
+        """Put a model back on its rollback target. Raises NoRollbackTarget,
+        ReleaseNotSaved or ReleaseSaveUnknown."""
+        await self._operator_change(
+            name, lambda: self.releases.plan_rollback(name, reason, "operator")
+        )
         return self.releases.state[name].model_copy()
 
-    async def _save_and_apply(self, event: ReleaseEvent) -> None:
-        """Persist a planned operator change under release_lock before applying it.
+    async def _operator_change(
+        self, name: BackendName, plan: Callable[[], ReleaseEvent]
+    ) -> None:
+        """One operator change at a time (release_lock). Only operators take
+        that lock: chats never wait for an operator's store write."""
+        async with self.release_lock:
+            # A cancel, such as a client disconnect, waits for the whole
+            # change, so a saved change is never left unapplied.
+            await self._finish(self._plan_save_apply(name, plan), hold=True)
 
-        Controller events still waiting to be saved go first in the same write.
-        The caller shields the save and apply from request cancellation.
-        """
+    async def _plan_save_apply(
+        self, name: BackendName, plan: Callable[[], ReleaseEvent]
+    ) -> None:
+        """Plan, save, then apply. A change the store does not have would be
+        undone by a restart, so a failed save changes nothing.
+
+        The save is the only await. If the controller rolls back or confirms
+        the model meanwhile, the change is planned again on the new state and
+        saved again, after the controller's event, so the answer the operator
+        gets is what the store holds. Each controller change ends a watch, so
+        this repeats at most a few times."""
+        for _ in range(MAX_RELEASE_REPLANS):
+            event = plan()
+            before = self.releases.state[name]
+            await self._save_release_change(event)
+            if self.releases.state[name] is before:
+                self.releases.apply(event)
+                logger.info(
+                    "Operator %s %s: now %s",
+                    event.action.replace("_", " "),
+                    name,
+                    event.version,
+                )
+                return
+        logger.warning("Release change for %s kept racing the controller", name)
+        raise ReleaseNotSaved
+
+    async def _save_release_change(self, event: ReleaseEvent) -> None:
+        """Save the controller events still waiting, then `event`, in one
+        write. A write that fails or times out is read back: it may have been
+        saved anyway. Raises ReleaseNotSaved or ReleaseSaveUnknown."""
         async with self.save_lock:
             waiting = self.releases.unsaved
             self.releases.unsaved = []
@@ -327,17 +373,25 @@ class Gateway:
                     self.store.save_release_events([*waiting, event]),
                     self.store_timeout,
                 )
+                return
             except Exception as exc:
-                self.releases.unsaved = waiting + self.releases.unsaved
                 logger.warning("Could not save release change (%s)", type(exc).__name__)
-                raise ReleaseNotSaved from None
-        self.releases.apply(event)
-        logger.info(
-            "Operator %s %s: now %s",
-            event.action.replace("_", " "),
-            event.backend,
-            event.version,
-        )
+            try:
+                latest = await asyncio.wait_for(
+                    self.store.latest_release_events(), self.store_timeout
+                )
+            except Exception as exc:
+                # Unknown: keep the waiting events, so they are saved again.
+                self.releases.unsaved = waiting + self.releases.unsaved
+                logger.warning(
+                    "Could not read the release change back (%s)", type(exc).__name__
+                )
+                raise ReleaseSaveUnknown from None
+            if event in latest:
+                logger.info("Release change was saved despite the error")
+                return
+            self.releases.unsaved = waiting + self.releases.unsaved
+            raise ReleaseNotSaved
 
     async def restore_releases(self) -> None:
         """At startup: serve the release each model had before the restart. A
@@ -409,7 +463,9 @@ class Gateway:
         await self.save_interventions()
         await self._save_request(response, jev)
 
-    async def _finish(self, saving: Coroutine[Any, Any, None]) -> None:
+    async def _finish(
+        self, saving: Coroutine[Any, Any, None], hold: bool = False
+    ) -> None:
         """Run a save as its own task. A cancel waits for it, then passes on.
 
         store_timeout bounds each store call, not the whole wait: a save can
@@ -421,7 +477,15 @@ class Gateway:
         try:
             await asyncio.shield(save)
         except asyncio.CancelledError:
-            await asyncio.wait({save})
+            # Normally a second cancel stops the wait; the save keeps running
+            # in pending_saves. With `hold`, wait through every cancel: the
+            # caller holds a lock that must not be released mid-save.
+            while not save.done():
+                try:
+                    await asyncio.wait({save})
+                except asyncio.CancelledError:
+                    if not hold:
+                        raise
             raise
 
     async def finish_saves(self) -> None:
@@ -594,20 +658,21 @@ class Gateway:
             logger.warning(
                 "Backend %s failed (%s)", backend.config.name, type(exc).__name__
             )
-            async with self.release_lock:
-                if self.releases.generation[name] != generation:
-                    # The call started on a version the model no longer serves;
-                    # its failure says nothing about the new one.
-                    return None, action, False, generation
-                action = (
-                    self.controller.record_error(
-                        name,
-                        can_disable=self.others_usable(backend),
-                        own_route=own_route,
-                    )
-                    or action
+            # No await from here to the return: the check and the record see
+            # one release state, without holding a lock on the reply path.
+            if self.releases.generation[name] != generation:
+                # The call started on a version the model no longer serves;
+                # its failure says nothing about the new one.
+                return None, action, False, generation
+            action = (
+                self.controller.record_error(
+                    name,
+                    can_disable=self.others_usable(backend),
+                    own_route=own_route,
                 )
-                self._finish_release_watch(backend)
+                or action
+            )
+            self._finish_release_watch(backend)
             return None, action, False, generation
         usage.completed_calls += 1
         return generated, action, False, generation
@@ -755,55 +820,57 @@ class Gateway:
             intent = "unknown"
             reply = "Sorry, the demo could not produce a valid reply. Please try again."
             facts = []
-        async with self.release_lock:
-            # A reply from a call that started on a version the model no longer
-            # serves goes to the customer, but the monitors skip it: it says
-            # nothing about the new version.
-            current = self.releases.generation[backend.config.name] == generation
-            # The trace reports validation of the original generated reply.
-            if current:
-                action = (
-                    self.controller.record(
-                        backend.config.name,
-                        bool(format_errors),
-                        can_disable=self.others_usable(backend),
-                        own_route=backend is selected,
-                    )
-                    or action
+        # No await in this block: the generation check, the monitors and the
+        # watch all see one release state, and the reply path holds no lock,
+        # so an operator's store write never delays a customer.
+        # A reply from a call that started on a version the model no longer
+        # serves goes to the customer, but the monitors skip it: it says
+        # nothing about the new version.
+        current = self.releases.generation[backend.config.name] == generation
+        # The trace reports validation of the original generated reply.
+        if current:
+            action = (
+                self.controller.record(
+                    backend.config.name,
+                    bool(format_errors),
+                    can_disable=self.others_usable(backend),
+                    own_route=backend is selected,
                 )
-            if current and not format_errors:
-                # Score the model's own label against Jev's intent answer. A failed
-                # format check gives no semantic sample; the controller counted it.
-                # Only like with like: a mock model against mock Jev, or a real
-                # model against real Jev. A mix disagrees by design, so it is never
-                # scored and never acted on.
-                if self.jev_mocked == getattr(backend, "mocked", True):
-                    sample = score(generated.intent, jev)
-                    rerouted = backend is not selected
-                    self.semantic.record(backend.config.name, sample, rerouted)
-                    self.metrics.semantic_samples.labels(
-                        backend.config.name, sample, "rerouted" if rerouted else "own"
-                    ).inc()
-                    # Only replies on the model's own route can trigger an action. A
-                    # rerouted reply can follow a one-off error from the selected
-                    # model, which is still usable, so it must not disable the model
-                    # that served it.
-                    if self.semantic.rules.actions_enabled and not rerouted:
-                        action = (
-                            self.controller.record_semantic(
-                                backend.config.name,
-                                self._semantic_reason(backend.config.name),
-                                can_disable=self.others_answering(backend),
-                            )
-                            or action
+                or action
+            )
+        if current and not format_errors:
+            # Score the model's own label against Jev's intent answer. A failed
+            # format check gives no semantic sample; the controller counted it.
+            # Only like with like: a mock model against mock Jev, or a real
+            # model against real Jev. A mix disagrees by design, so it is never
+            # scored and never acted on.
+            if self.jev_mocked == getattr(backend, "mocked", True):
+                sample = score(generated.intent, jev)
+                rerouted = backend is not selected
+                self.semantic.record(backend.config.name, sample, rerouted)
+                self.metrics.semantic_samples.labels(
+                    backend.config.name, sample, "rerouted" if rerouted else "own"
+                ).inc()
+                # Only replies on the model's own route can trigger an action. A
+                # rerouted reply can follow a one-off error from the selected
+                # model, which is still usable, so it must not disable the model
+                # that served it.
+                if self.semantic.rules.actions_enabled and not rerouted:
+                    action = (
+                        self.controller.record_semantic(
+                            backend.config.name,
+                            self._semantic_reason(backend.config.name),
+                            can_disable=self.others_answering(backend),
                         )
-                else:
-                    self.semantic.skip(backend.config.name)
-                    self.metrics.semantic_not_compared.labels(backend.config.name).inc()
-            if current:
-                # After the semantic check, so it can roll back on the watch's
-                # last call before the release is confirmed.
-                self._finish_release_watch(backend)
+                        or action
+                    )
+            else:
+                self.semantic.skip(backend.config.name)
+                self.metrics.semantic_not_compared.labels(backend.config.name).inc()
+        if current:
+            # After the semantic check, so it can roll back on the watch's
+            # last call before the release is confirmed.
+            self._finish_release_watch(backend)
 
         response = ChatResponse(
             id=request_id,

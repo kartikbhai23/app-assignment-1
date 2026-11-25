@@ -34,8 +34,15 @@ from app_assignment_1.service import (
     LastUsableBackend,
     NotAMock,
     ReleaseNotSaved,
+    ReleaseSaveUnknown,
 )
 from app_assignment_1.store import Store, create_store
+
+UNKNOWN_SAVE = (
+    "Could not confirm the release change was saved. The running gateway did "
+    "not change, but a restart may apply it; check release_history in "
+    "/v1/health"
+)
 
 
 def create_app(
@@ -213,6 +220,8 @@ def create_app(
             raise HTTPException(
                 503, "The release change could not be saved; nothing changed"
             ) from None
+        except ReleaseSaveUnknown:
+            raise HTTPException(503, UNKNOWN_SAVE) from None
 
     @app.post(
         "/v1/operator/models/{name}/rollback",
@@ -239,6 +248,8 @@ def create_app(
             raise HTTPException(
                 503, "The release change could not be saved; nothing changed"
             ) from None
+        except ReleaseSaveUnknown:
+            raise HTTPException(503, UNKNOWN_SAVE) from None
 
     @app.post(
         "/v1/faults",

@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from app_assignment_1.api import create_app
 from app_assignment_1.config import Settings
-from app_assignment_1.releases import load_catalog
+from app_assignment_1.releases import AlreadyServing, load_catalog
 from app_assignment_1.router import MockJevRouter
 from app_assignment_1.schemas import ReleaseEvent
 from app_assignment_1.service import BackendUnavailable, Gateway
@@ -432,18 +432,24 @@ def test_an_operator_ack_matches_storage_when_a_call_finishes_during_save(tmp_pa
         resume.set()
         await asyncio.wait_for(finishing.wait(), 1)
         try:
-            # The old call has reached accounting, but cannot confirm during
-            # the operator's write. The previously known-good base stays the target.
-            assert gateway.releases.state[SMALL].status == "watching"
+            # The old call confirms v2-good during the operator's write: the
+            # chat path never waits for that write.
+            assert gateway.releases.state[SMALL].status == "stable"
         finally:
             store.resume.set()
         ack = await asyncio.wait_for(deploy, 1)
+        # The deploy was planned again on the confirmed state and saved again,
+        # after the confirmation, before the operator got the answer.
         saved = (await store.latest_release_events())[0]
         assert (ack.version, ack.rollback_target) == (
             saved.version,
             saved.rollback_target,
         )
-        assert saved.rollback_target == "base"
+        assert saved.rollback_target == "v2-good"
+        assert [e.action for e in store.release_events][-2:] == [
+            "confirmed",
+            "deployed",
+        ]
         assert (await old_chat).trace.simulated_latency_ms == 1
         await gateway.finish_saves()
         assert gateway.releases.state[SMALL].watched_samples == 0
@@ -704,3 +710,117 @@ def test_semantic_watch_waits_for_comparable_intent_evidence(tmp_path):
         for _ in range(6):
             assert chat(client).status_code == 200
         assert releases(client)[SMALL]["status"] == "watching"
+
+
+# --- second review: the reply path, cancels and saves that answer late ---
+
+
+class BlockingStore(MemoryStore):
+    """Holds every release write until `resume` is set."""
+
+    def __init__(self) -> None:
+        super().__init__(100)
+        self.entered = asyncio.Event()
+        self.resume = asyncio.Event()
+
+    async def save_release_events(self, items: Sequence[ReleaseEvent]) -> None:
+        self.entered.set()
+        await self.resume.wait()
+        await super().save_release_events(items)
+
+
+def test_an_operator_save_never_delays_a_chat(tmp_path):
+    """Review 2 of #107, item 1: chats on both models answer while a deploy
+    is still being saved, within a short deadline."""
+
+    async def main() -> None:
+        store = BlockingStore()
+        settings = make_settings(
+            tmp_path,
+            request_deadline_seconds=1.0,
+            alternate_reserve_seconds=0.5,
+            jev_timeout_seconds=0.2,
+        )
+        g = Gateway(settings, MockJevRouter(settings.intents_path), store=store)
+        deploy = asyncio.create_task(g.deploy_release(LARGE, "v2-good", "slow save"))
+        await asyncio.wait_for(store.entered.wait(), 1)
+        small, large = await asyncio.wait_for(
+            asyncio.gather(g.chat(STANDARD), g.chat(COMPLEX)), 0.5
+        )
+        assert (small.trace.model, large.trace.model) == (SMALL, LARGE)
+        # Failover to the other model still works during the save.
+        g.backend(SMALL).config.error_rate = 1
+        failover = await asyncio.wait_for(g.chat(STANDARD), 0.5)
+        assert failover.trace.model == LARGE
+        assert not deploy.done()
+        store.resume.set()
+        assert (await deploy).version == "v2-good"
+
+    asyncio.run(main())
+
+
+def test_two_cancels_keep_the_lock_until_the_save_ends(tmp_path):
+    """Review 2 of #107, item 2."""
+
+    async def main() -> None:
+        store = BlockingStore()
+        settings = make_settings(tmp_path)
+        g = Gateway(settings, MockJevRouter(settings.intents_path), store=store)
+        deploy = asyncio.create_task(g.deploy_release(SMALL, "v2-good", "cancel me"))
+        await asyncio.wait_for(store.entered.wait(), 1)
+        deploy.cancel()
+        await asyncio.sleep(0)
+        deploy.cancel()
+        await asyncio.sleep(0.05)
+        assert g.release_lock.locked()
+        assert not deploy.done()
+        store.resume.set()
+        with pytest.raises(asyncio.CancelledError):
+            await deploy
+        assert not g.release_lock.locked()
+        # The saved change was applied, so the same deploy is refused.
+        assert g.releases.state[SMALL].version == "v2-good"
+        with pytest.raises(AlreadyServing):
+            await g.deploy_release(SMALL, "v2-good", "again")
+        assert [e.version for e in store.release_events] == ["v2-good"]
+
+    asyncio.run(main())
+
+
+class LateStore(MemoryStore):
+    """Saves, then answers after the store timeout."""
+
+    def __init__(self, readable: bool = True) -> None:
+        super().__init__(100)
+        self.readable = readable
+
+    async def save_release_events(self, items: Sequence[ReleaseEvent]) -> None:
+        await super().save_release_events(items)
+        await asyncio.sleep(1)
+
+    async def latest_release_events(self) -> list[ReleaseEvent]:
+        if not self.readable:
+            raise ConnectionError("database down")
+        return await super().latest_release_events()
+
+
+def test_a_save_that_answers_late_is_read_back(tmp_path):
+    """Review 2 of #107, item 3: the write committed, so the change applies."""
+    store = LateStore()
+    settings = make_settings(tmp_path, store_timeout_seconds=0.1)
+    with TestClient(create_app(settings, store=store)) as client:
+        response = deploy(client, "v2-bad-format")
+        assert response.status_code == 200
+        assert releases(client)[SMALL]["version"] == "v2-bad-format"
+    with TestClient(create_app(settings, store=store)) as client:
+        assert releases(client)[SMALL]["version"] == "v2-bad-format"
+
+
+def test_a_save_that_cannot_be_read_back_says_so(tmp_path):
+    store = LateStore(readable=False)
+    settings = make_settings(tmp_path, store_timeout_seconds=0.1)
+    with TestClient(create_app(settings, store=store)) as client:
+        response = deploy(client, "v2-bad-format")
+        assert response.status_code == 503
+        assert "Could not confirm" in response.json()["detail"]
+        assert releases(client)[SMALL]["version"] == "base"
