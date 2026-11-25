@@ -4,7 +4,6 @@ const SCREENS = [
   { id: "chat", label: "Chat" },
   { id: "health", label: "Health" },
 ];
-const COMING_SOON = ["Jev", "Dashboard"];
 
 export default function Sidebar({ view, onNavigate, onNewChat, health, healthError }) {
   const degraded = health?.status === "degraded";
@@ -45,13 +44,11 @@ export default function Sidebar({ view, onNavigate, onNewChat, health, healthErr
             )}
           </button>
         ))}
-        {COMING_SOON.map((label) => (
-          <button key={label} type="button" className="nav-item" disabled>
-            {label}
-            <span className="soon">soon</span>
-          </button>
-        ))}
       </nav>
+
+      <p className="muted sidebar-note">
+        Jev normally picks the route. Open Show details on a reply to see which router handled it.
+      </p>
 
       <div className="status-card">
         <span className="status-line">
