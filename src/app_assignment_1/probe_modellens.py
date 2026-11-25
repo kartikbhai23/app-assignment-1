@@ -7,6 +7,12 @@ same function ModelLens's own linear probes use
 (`modellens.analysis.probing`). It only adapts that to `ActivationExtractor`,
 so `train_probe` and `run_gate` in `probe.py` work on real activations.
 
+The text the model reads is rebuilt the way vLLM builds it for the gateway:
+the gateway's system prompt, the customer message, the chat template's
+generation prompt, then the reply exactly as the model generated it. Nothing
+follows the reply, so `last` pooling lands on the reply's final token, not on
+the template's closing tokens.
+
 ModelLens, torch and transformers are in the optional `probe` extra and are
 imported only by `ModelLensExtractor.from_pretrained`, so the gateway and the
 test suite never load them. Nothing here runs in the gateway.
@@ -17,10 +23,19 @@ import math
 from collections.abc import Callable
 from typing import Any, Literal, get_args
 
+from pydantic import TypeAdapter
+
+from app_assignment_1.config import get_settings
+from app_assignment_1.labels import load_labels
+from app_assignment_1.schemas import PolicyCard
+from app_assignment_1.vllm import build_system_prompt
+
 Pooling = Literal["last", "mean"]
 POOLINGS: tuple[str, ...] = get_args(Pooling)
 
 DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
+# The revision vLLM serves on the GPU host (compose.gpu.yml).
+DEFAULT_REVISION = "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
 
 # Qwen3ForCausalLM names its decoder layers model.layers.0 to model.layers.27.
 LAYER_NAME = "model.layers.{layer}"
@@ -53,8 +68,11 @@ class ModelLensExtractor:
         pooling: Pooling = "last",
         device: str | None = None,
         pool: Callable[[Any, str], Any] | None = None,
+        system_prompt: str | None = None,
     ):
-        """`pool` defaults to ModelLens's probe pooling; tests pass a fake."""
+        """`system_prompt` is the system message the gateway sent with the
+        message (see `gateway_system_prompt`); None leaves it out. `pool`
+        defaults to ModelLens's probe pooling; tests pass a fake."""
         if layer < 0:
             raise ValueError("layer must be 0 or more.")
         if pooling not in POOLINGS:
@@ -65,6 +83,7 @@ class ModelLensExtractor:
         self.pooling: Pooling = pooling
         self.device = device
         self.pool = pool
+        self.system_prompt = system_prompt
         self.layer_name = LAYER_NAME.format(layer=layer)
         if self.layer_name not in lens.layer_names():
             raise ValueError(f"Layer '{self.layer_name}' not found.")
@@ -75,13 +94,18 @@ class ModelLensExtractor:
         layer: int,
         pooling: Pooling = "last",
         model_name: str = DEFAULT_MODEL,
-        revision: str | None = None,
+        revision: str | None = DEFAULT_REVISION,
         device: str = "cpu",
+        system_prompt: str | None = None,
     ) -> "ModelLensExtractor":
         """Load the model and tokenizer from HuggingFace and wrap them.
 
-        Pin `revision` for a gate run, so the report can be repeated.
+        `revision` defaults to the one vLLM serves, so the probe reads the
+        same weights that produced the replies. `system_prompt` defaults to
+        the gateway's (`gateway_system_prompt`); pass "" to leave it out.
         """
+        if system_prompt is None:
+            system_prompt = gateway_system_prompt()
         try:
             modellens = importlib.import_module("modellens")
             transformers = importlib.import_module("transformers")
@@ -95,19 +119,27 @@ class ModelLensExtractor:
         ).to(device)
         lens = modellens.ModelLens(model, backend="huggingface")
         lens.adapter.set_tokenizer(tokenizer)
-        return cls(lens, tokenizer, layer, pooling, device)
+        return cls(
+            lens, tokenizer, layer, pooling, device, system_prompt=system_prompt or None
+        )
 
     def format_text(self, prompt: str, reply: str) -> str:
-        """The prompt and reply as the model saw them, using its chat
-        template when the tokenizer has one."""
+        """The text the model read when it wrote `reply`.
+
+        With a chat template, this is the template applied to the system and
+        user messages with the generation prompt, followed by `reply`. Pass
+        the reply exactly as the model generated it (the raw completion,
+        including any thinking block), so the tokens match.
+        """
+        messages = [{"role": "user", "content": prompt}]
+        if self.system_prompt:
+            messages.insert(0, {"role": "system", "content": self.system_prompt})
         if getattr(self.tokenizer, "chat_template", None):
-            messages = [
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": reply},
-            ]
-            text: str = self.tokenizer.apply_chat_template(messages, tokenize=False)
-            return text
-        return f"{prompt}\n{reply}"
+            prefix: str = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            return prefix + reply
+        return "\n".join(message["content"] for message in messages) + "\n" + reply
 
     def extract(self, prompt: str, reply: str) -> list[float]:
         tokens = self.tokenizer(self.format_text(prompt, reply), return_tensors="pt")
@@ -124,6 +156,16 @@ class ModelLensExtractor:
         if not all(math.isfinite(value) for value in vector):
             raise ValueError("Activations must be finite numbers.")
         return vector
+
+
+def gateway_system_prompt() -> str:
+    """The system prompt the gateway sends to vLLM, built from the same
+    labels and policy cards (paths from the gateway's settings)."""
+    settings = get_settings()
+    cards = TypeAdapter(dict[str, PolicyCard]).validate_json(
+        settings.policy_cards_path.read_text()
+    )
+    return build_system_prompt(load_labels(settings.labels_path), cards)
 
 
 def _modellens_pool() -> Callable[[Any, str], Any]:

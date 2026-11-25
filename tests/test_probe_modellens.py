@@ -5,12 +5,14 @@ import importlib
 import pytest
 
 from app_assignment_1 import probe_modellens
+from app_assignment_1.config import get_settings
+from app_assignment_1.labels import load_labels
 from app_assignment_1.probe import (
     ActivationExtractor,
     ProbeExample,
     train_probe,
 )
-from app_assignment_1.probe_modellens import ModelLensExtractor
+from app_assignment_1.probe_modellens import ModelLensExtractor, gateway_system_prompt
 
 
 class FakeVector:
@@ -35,9 +37,15 @@ class FakeTokenizer:
     def __init__(self, chat_template=None):
         self.chat_template = chat_template
 
-    def apply_chat_template(self, messages, tokenize):
+    def apply_chat_template(self, messages, tokenize, add_generation_prompt):
+        # ChatML, the format Qwen3 uses.
         assert tokenize is False
-        return "|".join(f"{m['role']}:{m['content']}" for m in messages)
+        text = "".join(
+            f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n" for m in messages
+        )
+        if add_generation_prompt:
+            text += "<|im_start|>assistant\n"
+        return text
 
     def __call__(self, text, return_tensors):
         assert return_tensors == "pt"
@@ -125,11 +133,35 @@ def test_mean_pooling_averages_tokens():
     assert extractor.extract("a", "c") == [(97 + 10 + 99) / 3, 1.0]
 
 
-def test_chat_template_is_used_when_present():
+def test_chat_template_matches_what_the_gateway_sent():
     extractor = ModelLensExtractor(
-        FakeLens(), FakeTokenizer("t"), layer=0, pool=fake_pool
+        FakeLens(), FakeTokenizer("t"), 0, pool=fake_pool, system_prompt="rules"
     )
-    assert extractor.format_text("q", "a") == "user:q|assistant:a"
+    assert extractor.format_text("q", '{"intent": "x"}') == (
+        "<|im_start|>system\nrules<|im_end|>\n"
+        "<|im_start|>user\nq<|im_end|>\n"
+        '<|im_start|>assistant\n{"intent": "x"}'
+    )
+
+
+def test_last_pooling_lands_on_the_reply_not_the_template():
+    extractor = ModelLensExtractor(
+        FakeLens(), FakeTokenizer("t"), 0, pool=fake_pool, system_prompt="rules"
+    )
+    # The fake lens makes one row per character; the last is the reply's "}".
+    assert extractor.extract("q", '{"intent": "x"}') == [float(ord("}")), 1.0]
+
+
+def test_no_system_prompt_without_one():
+    extractor = ModelLensExtractor(FakeLens(), FakeTokenizer(), 0, pool=fake_pool)
+    assert extractor.format_text("q", "a") == "q\na"
+
+
+def test_gateway_system_prompt_lists_every_label():
+    prompt = gateway_system_prompt()
+    assert prompt.startswith("You are a support assistant")
+    for label in load_labels(get_settings().labels_path).names:
+        assert f"- {label}:" in prompt
 
 
 def test_tokens_move_to_the_device():

@@ -46,7 +46,7 @@ The standard error is about 0.2 to 0.3 points at 4,000 runs and 0.5 at 2,000. So
 
 [ModelLens](https://github.com/SebastianVillalobosAlva/ModelLens) is Sebastian's interpretability toolkit. It captures a PyTorch model's layer outputs with forward hooks, and it supports Qwen3. It also has its own linear probes (`modellens.analysis.probing`: `train_probe`, `probe_sweep`, `apply_probe`), which help with exploring, for example choosing a layer with `probe_sweep`.
 
-`src/app_assignment_1/probe_modellens.py` uses it for the real extractor, `ModelLensExtractor`. The extractor captures one Qwen3 decoder layer (`model.layers.N`) with ModelLens and pools it with the same function ModelLens's probes use: `last` keeps the final token, and `mean` averages over all tokens. The prompt and reply are joined with the tokenizer's chat template. The gate itself stays here (`train_probe` and `run_gate` in `probe.py`), because ModelLens's probes report accuracy, while the gate compares AUROC against token confidence.
+`src/app_assignment_1/probe_modellens.py` uses it for the real extractor, `ModelLensExtractor`. The extractor captures one Qwen3 decoder layer (`model.layers.N`) with ModelLens and pools it with the same function ModelLens's probes use: `last` keeps the final token, and `mean` averages over all tokens. It rebuilds the text the way vLLM builds it for the gateway: the gateway's system prompt (`gateway_system_prompt`, from the same labels and policy cards), the customer message, the chat template's generation prompt, and then the reply. Nothing follows the reply, so `last` lands on the reply's final token, today the closing `}` of the JSON, not on the template's closing tokens. Pass the reply exactly as the model generated it (the raw completion, including any thinking block), so the tokens match. `from_pretrained` defaults to the model revision vLLM serves. The gate itself stays here (`train_probe` and `run_gate` in `probe.py`), because ModelLens's probes report accuracy, while the gate compares AUROC against token confidence.
 
 ModelLens, torch and transformers are in the optional `probe` extra, pinned to one ModelLens commit. The gateway image and CI never install it. Install it on the GPU host, or on any machine with enough memory for Qwen3-1.7B:
 
@@ -58,21 +58,20 @@ uv sync --extra dev --extra probe
 from app_assignment_1.probe import train_probe
 from app_assignment_1.probe_modellens import ModelLensExtractor
 
-extractor = ModelLensExtractor.from_pretrained(
-    layer=14, pooling="last", revision="<pinned commit>", device="cuda"
-)
+# Uses the gateway's system prompt and vLLM's model revision by default.
+extractor = ModelLensExtractor.from_pretrained(layer=14, pooling="last", device="cuda")
 features = [extractor.extract(e.prompt, e.reply) for e in train_examples]
 probe = train_probe(features, [e.correct for e in train_examples])
 ```
 
-What was checked: the unit tests use a fake lens. By hand, on a tiny randomly initialized Qwen3 (4 layers, no download), the `last` vector matched the hidden state that transformers itself reports for that layer. It has not been run on Qwen3-1.7B, so there are no probe results.
+What was checked: the unit tests use a fake lens and a ChatML-style template, the format Qwen3 uses. By hand, on a tiny randomly initialized Qwen3 (4 layers, no download) with a ChatML template, the text had system, user and assistant turns, its last token was the reply's `}`, and the `last` vector matched the hidden state that transformers itself reports for that layer. The real Qwen3 tokenizer could not be downloaded in that check. It has not been run on Qwen3-1.7B, so there are no probe results.
 
 Notes:
 
 - The vector is the raw layer output. For the last layer, that is before the final norm, so it differs from the last entry of transformers' `hidden_states`.
 - `last` pooling takes the final position, so pass one example at a time (as `extract` does), not a padded batch.
 - The proposed primary position, the last intent-label token, is not built yet. It needs the reply's token offsets.
-- Pin `revision` for a gate run and record the layer and pooling in `GateRunInfo`.
+- Record the model revision, layer and pooling in `GateRunInfo`.
 
 ## Still to build
 
