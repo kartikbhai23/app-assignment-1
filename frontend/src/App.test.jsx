@@ -459,6 +459,18 @@ describe("Issue 31", () => {
     expect(within(rows[2]).getAllByRole("cell").map((c) => c.textContent)).toEqual(["qwen3-4b", "9", "9", "0"]);
   });
 
+  it.each([
+    ["mock", "real", "Real Qwen (vLLM); Jev is simulated", /Jev is a mock\. The Qwen models run on vLLM/],
+    ["real", "real", "Real Jev (TypeSafe) and real Qwen (vLLM)", /Jev calls go to TypeSafe.*The Qwen models run on vLLM/],
+  ])("names real Qwen when jev_mode is %s and mode is %s", async (jevMode, mode, sidebar, note) => {
+    const health = { ...healthyHealth, jev_mode: jevMode, mode };
+    const user = renderWith(fakeGateway({ health }));
+    expect(await screen.findByText(sidebar)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Health" }));
+    expect(await screen.findByText(note)).toBeInTheDocument();
+    expect(screen.queryByText(/Mock mode: token usage/)).not.toBeInTheDocument();
+  });
+
   it("says Jev calls go to TypeSafe when Jev is real", async () => {
     const health = { ...healthyHealth, jev_mode: "real", router: "jev" };
     const user = renderWith(fakeGateway({ health }));

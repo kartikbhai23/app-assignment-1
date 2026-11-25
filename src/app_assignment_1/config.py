@@ -57,8 +57,8 @@ class Settings(BaseSettings):
     store_timeout_seconds: float = Field(default=2, gt=0, le=30)
 
     # Real providers (docs/JEV_QWEN_INTEGRATION_PLAN.md). Mock is the default.
-    # jev_mode=real sends each message to TypeSafe. provider_mode covers the
-    # Qwen backends; its real mode is rejected until the vLLM client is wired.
+    # jev_mode=real sends each message to TypeSafe. provider_mode=real sends it
+    # to the two vLLM servers instead of the keyword mocks.
     jev_mode: Literal["mock", "real"] = "mock"
     provider_mode: Literal["mock", "real"] = "mock"
     jev_base_url: AnyHttpUrl = AnyHttpUrl("https://api.typesafe.ai")
@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     # they answer 403. Set it only in the real env file, never in Git.
     operator_token: SecretStr | None = None
     # The two vLLM servers on the GPU host's private IP (compose.gpu.yml), for
-    # example http://10.0.12.34:8001. Unset until the backends are wired in.
+    # example http://10.0.12.34:8001. Read only when provider_mode is real.
     vllm_small_base_url: AnyHttpUrl | None = None
     vllm_large_base_url: AnyHttpUrl | None = None
     # The key both vLLM servers require (VLLM_API_KEY in env/gpu.env), sent as a
@@ -152,26 +152,27 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def real_mode_needs_a_jev_key(self) -> "Settings":
-        for name, mode in (
-            ("jev_mode", self.jev_mode),
-            ("provider_mode", self.provider_mode),
-        ):
-            if mode == "real" and (
-                self.jev_api_key is None or not self.jev_api_key.get_secret_value()
-            ):
-                raise ValueError(f"{name} 'real' needs APP_JEV_API_KEY")
+    def real_jev_needs_a_key_and_https(self) -> "Settings":
+        if self.jev_mode != "real":
+            return self
+        if self.jev_api_key is None or not self.jev_api_key.get_secret_value():
+            raise ValueError("jev_mode 'real' needs APP_JEV_API_KEY")
+        # The client sends the API key with every request.
+        if self.jev_base_url.scheme != "https":
+            raise ValueError("jev_mode 'real' needs an https APP_JEV_BASE_URL")
         return self
 
     @model_validator(mode="after")
-    def real_mode_needs_https(self) -> "Settings":
-        # The client sends the API key with every request.
-        for name, mode in (
-            ("jev_mode", self.jev_mode),
-            ("provider_mode", self.provider_mode),
-        ):
-            if mode == "real" and self.jev_base_url.scheme != "https":
-                raise ValueError(f"{name} 'real' needs an https APP_JEV_BASE_URL")
+    def real_qwen_needs_both_urls_and_a_key(self) -> "Settings":
+        if self.provider_mode != "real":
+            return self
+        if self.vllm_small_base_url is None or self.vllm_large_base_url is None:
+            raise ValueError(
+                "provider_mode 'real' needs APP_VLLM_SMALL_BASE_URL and "
+                "APP_VLLM_LARGE_BASE_URL"
+            )
+        if self.vllm_api_key is None or not self.vllm_api_key.get_secret_value():
+            raise ValueError("provider_mode 'real' needs APP_VLLM_API_KEY")
         return self
 
 
