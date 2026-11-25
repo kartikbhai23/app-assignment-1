@@ -80,9 +80,9 @@ components:
     owner: "Verness · Yanzhen: vLLM client"
     items:
       - built: "Fallback with budgets; both down: 503"
-      - built: vLLM client (not wired in)
+      - built: vLLM client with typed failures
       - simulated: Gateway uses mocks
-      - todo: Gateway wiring; typed failures
+      - todo: Gateway wiring; error codes
 
   format_validation:
     title: Format validation
@@ -113,7 +113,7 @@ components:
     owner: Sebastian
     items:
       - built: Format and failed-call rate
-      - built: Jev agreement and coverage
+      - built: "Jev agreement: mock-mock, real-real"
       - built: Rate vs. a set baseline
       - todo: Baseline from dev data
 
@@ -155,8 +155,8 @@ components:
       - built: Pydantic Settings, private env file, thresholds; no secrets in Git or the image
       - simulated: 10 intents and 10 policy cards
       - built: One 78-label file; replies only for the 10 carded intents
-      - built: Jev API key and model, operator token; real mode needs the key
-      - todo: Backend URLs
+      - built: Jev key and model, vLLM URLs and key, operator token
+      - todo: Gateway reads the vLLM settings
       - todo: Prompt versions and rollback target; data/ splits and fresh set
 
   vllm_small:
