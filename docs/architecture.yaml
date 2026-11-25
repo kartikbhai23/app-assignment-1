@@ -113,7 +113,7 @@ components:
     owner: Sebastian
     items:
       - built: Format and failed-call rate
-      - built: Jev agreement and coverage
+      - built: "Jev agreement: mock-mock, real-real"
       - built: Rate vs. a set baseline
       - todo: Baseline from dev data
 
