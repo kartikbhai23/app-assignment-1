@@ -45,18 +45,26 @@ class Trace(StrictModel):
     jev_choice: Route | None
     route: Route
     model: BackendName
+    # policy_template: a mock filled a card's template. generated: a real model
+    # wrote the reply.
     reply_source: Literal[
-        "policy_template", "no_match", "unsupported_topic", "format_fallback"
+        "policy_template",
+        "generated",
+        "no_match",
+        "unsupported_topic",
+        "format_fallback",
     ]
     confidence: float | None = Field(ge=0, le=1)
     latency_ms: float = Field(ge=0)
+    # A mock's configured delay; 0 for a real model.
     simulated_latency_ms: int = Field(ge=0)
     format_check: Literal["passed", "failed"]
     format_errors: list[str] = Field(default_factory=list)
     fallback_reason: str | None = None
     controller_action: str | None = None
-    # The reply came from a mock Qwen backend; router says whether Jev was real.
-    mocked: Literal[True] = True
+    # Whether the reply came from a mock Qwen backend; router says whether Jev
+    # was real.
+    mocked: bool = True
     # Groups requests by the settings and config files that answered them.
     # None on requests saved before it existed.
     settings_version: str | None = None
@@ -191,11 +199,18 @@ class RecentRequest(StrictModel):
     format_check: Literal["passed", "failed"]
 
 
+# Why a backend call failed. The vLLM client's typed failures map to the first
+# three; anything else, such as a mock's simulated outage, is call_failed or other.
+BackendErrorCode = Literal["timeout", "call_failed", "invalid_output", "other"]
+
+
 class ModelUsage(StrictModel):
     name: BackendName
     attempted_calls: int = Field(ge=0)
     completed_calls: int = Field(ge=0)
     failed_calls: int = Field(ge=0)
+    # failed_calls split by BackendErrorCode; codes with no failures are absent.
+    failed_by_error: dict[BackendErrorCode, int] = Field(default_factory=dict)
     deadline_exceeded_calls: int = Field(default=0, ge=0)
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -264,7 +279,7 @@ class HealthResponse(StrictModel):
     usage: list[ModelUsage] = Field(default_factory=list)
     status: Literal["ok", "degraded"]
     # mode is the Qwen backends; jev_mode and router are Jev.
-    mode: Literal["mock"] = "mock"
+    mode: Literal["mock", "real"] = "mock"
     jev_mode: Literal["mock", "real"] = "mock"
     router: Literal["mock_jev", "jev"] = "mock_jev"
     backends: list[BackendConfig]

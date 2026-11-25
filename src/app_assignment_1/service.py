@@ -23,6 +23,7 @@ from app_assignment_1.records import JevAssessment, check_call
 from app_assignment_1.router import JevAnswer, JevResult, Router, RuleRouter
 from app_assignment_1.schemas import (
     BackendConfig,
+    BackendErrorCode,
     BackendName,
     BackendReply,
     ChatResponse,
@@ -35,6 +36,7 @@ from app_assignment_1.schemas import (
 )
 from app_assignment_1.semantic import SemanticMonitor, score
 from app_assignment_1.store import MemoryStore, Store
+from app_assignment_1.vllm import BackendCallError, BackendOutputError
 
 logger = logging.getLogger(__name__)
 QUESTIONS: tuple[Literal["route", "intent"], ...] = ("route", "intent")
@@ -73,6 +75,18 @@ class LastUsableBackend(Exception):
 
 class NotAMock(Exception):
     """A fault was asked for on a backend that is not a mock."""
+
+
+def backend_error_code(exc: Exception) -> BackendErrorCode:
+    """Name a failed backend call. TimeoutError covers the vLLM client's
+    BackendTimeoutError and the gateway's own per-attempt budget."""
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, BackendCallError | ConnectionError):
+        return "call_failed"
+    if isinstance(exc, BackendOutputError | ValidationError):
+        return "invalid_output"
+    return "other"
 
 
 def _jev_error_type(exc: Exception) -> str:
@@ -121,11 +135,11 @@ class Gateway:
         clock: Callable[[], float] = time.monotonic,
         store: Store | None = None,
     ):
-        if settings.provider_mode == "real":
-            raise ValueError(
-                "APP_PROVIDER_MODE=real is not built yet; the Jev and Qwen clients "
-                "come in later PRs"
-            )
+        if settings.provider_mode == "real" and (
+            backends is None or any(getattr(b, "mocked", True) for b in backends)
+        ):
+            # create_app builds the vLLM backends (real_backends.py).
+            raise ValueError("APP_PROVIDER_MODE=real needs the real vLLM backends")
         self.router = router
         # Test doubles may leave these out; both real routers set them.
         self.jev_mocked: bool = getattr(router, "mocked", True)
@@ -503,11 +517,16 @@ class Gateway:
                 usage.deadline_exceeded_calls += 1
                 return None, action, True
             usage.failed_calls += 1
+            code = backend_error_code(exc)
+            usage.failed_by_error[code] = usage.failed_by_error.get(code, 0) + 1
             # A reply that fails BackendReply validation also counts as a call
             # error. Cancellation still propagates. Do not log input text or
             # provider exception messages.
             logger.warning(
-                "Backend %s failed (%s)", backend.config.name, type(exc).__name__
+                "Backend %s failed: %s (%s)",
+                backend.config.name,
+                code,
+                type(exc).__name__,
             )
             return (
                 None,
@@ -690,6 +709,7 @@ class Gateway:
                 self.semantic.skip(backend.config.name)
                 self.metrics.semantic_not_compared.labels(backend.config.name).inc()
 
+        mocked = getattr(backend, "mocked", True)
         response = ChatResponse(
             id=request_id,
             intent=intent,
@@ -708,14 +728,17 @@ class Gateway:
                     else "unsupported_topic"
                     if uncarded
                     else "policy_template"
+                    if mocked
+                    else "generated"
                 ),
                 confidence=decision.confidence,
                 latency_ms=round((perf_counter() - start) * 1000, 2),
-                simulated_latency_ms=backend.config.latency_ms,
+                simulated_latency_ms=backend.config.latency_ms if mocked else 0,
                 format_check="failed" if format_errors else "passed",
                 format_errors=format_errors,
                 fallback_reason=", ".join(reasons) or None,
                 controller_action=action,
+                mocked=mocked,
                 settings_version=self.settings_version,
             ),
         )

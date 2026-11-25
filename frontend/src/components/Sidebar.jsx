@@ -5,6 +5,16 @@ const SCREENS = [
   { id: "health", label: "Health" },
 ];
 
+// Jev and Qwen are each mock or real (health.jev_mode and health.mode).
+function modeText(health) {
+  const jev = health?.jev_mode === "real";
+  const qwen = health?.mode === "real";
+  if (jev && qwen) return "Real Jev (TypeSafe) and real Qwen (vLLM)";
+  if (jev) return "Real Jev (TypeSafe); Qwen is simulated";
+  if (qwen) return "Real Qwen (vLLM); Jev is simulated";
+  return "Mock mode: Jev and Qwen are simulated";
+}
+
 export default function Sidebar({ view, onNavigate, onNewChat, health, healthError }) {
   const degraded = health?.status === "degraded";
   const status = healthError
@@ -56,9 +66,7 @@ export default function Sidebar({ view, onNavigate, onNewChat, health, healthErr
           {status.text}
         </span>
         <span className="muted">
-          {health?.jev_mode === "real"
-            ? "Real Jev (TypeSafe); Qwen is simulated"
-            : "Mock mode: Jev and Qwen are simulated"}
+          {modeText(health)}
         </span>
       </div>
     </aside>

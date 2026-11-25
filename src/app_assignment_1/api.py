@@ -11,6 +11,7 @@ from app_assignment_1.auth import require_operator
 from app_assignment_1.config import Settings, get_settings
 from app_assignment_1.jev import TypeSafeJevRouter, create_jev_http_client
 from app_assignment_1.labels import load_labels
+from app_assignment_1.real_backends import open_vllm_backends
 from app_assignment_1.router import MockJevRouter, Router
 from app_assignment_1.schemas import (
     BackendConfig,
@@ -56,7 +57,12 @@ def create_app(
                 )
             else:
                 chosen = MockJevRouter(configured.intents_path)
-            gateway = Gateway(configured, chosen, store=opened)
+            backends = (
+                await open_vllm_backends(configured, stack)
+                if configured.provider_mode == "real"
+                else None
+            )
+            gateway = Gateway(configured, chosen, backends, store=opened)
             await opened.open()
             app.state.gateway = gateway
             app.state.operator_token = configured.operator_token
@@ -114,6 +120,9 @@ def create_app(
         await gateway.save_interventions()
         return HealthResponse(
             status="ok" if healthy else "degraded",
+            mode="mock"
+            if all(getattr(b, "mocked", True) for b in gateway.backends)
+            else "real",
             jev_mode="mock" if gateway.jev_mocked else "real",
             router="mock_jev" if gateway.jev_mocked else "jev",
             recent_requests=[
